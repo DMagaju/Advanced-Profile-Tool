@@ -1,0 +1,17 @@
+[general]
+name=FTA Profile Tool
+qgisMinimumVersion=3.16
+description=Advanced Flood & Terrain Auditor — Normal Profile
+version=0.5
+author=Dipendra Magaju
+email=dipen.magaju@gmail.com
+about=Extracts un-interpolated normal profiles from raster and vector surfaces along a user-defined line alignment. Draw the alignment directly on the map canvas. Part of the Advanced Flood and Terrain Auditor (FTA) suite.
+tracker=
+repository=
+tags=profile,flood,terrain,hydrology,water,DEM
+homepage=
+category=Plugins
+icon=icon.svg
+experimental=True
+deprecated=False
+supportsQt6=True

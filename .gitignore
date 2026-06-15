@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+*.pyo
+plugin_backup_working.py

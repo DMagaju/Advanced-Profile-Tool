@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Background rounded rect -->
+  <rect width="32" height="32" rx="5" ry="5" fill="#0D47A1"/>
+
+  <!-- Subtle grid baseline -->
+  <line x1="2" y1="27" x2="30" y2="27" stroke="#90CAF9" stroke-width="0.6" opacity="0.4"/>
+
+  <!-- Terrain / profile curve — white -->
+  <polyline
+    points="2,27  5,25  8,19  11,23  14,9  17,13  21,20  25,24  30,24"
+    stroke="#FFFFFF" stroke-width="2.4"
+    fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+
+  <!-- Water-surface level — cyan dashed -->
+  <line x1="2" y1="21" x2="30" y2="21"
+        stroke="#4DD0E1" stroke-width="1.4" stroke-dasharray="4,2.5"/>
+
+  <!-- Vertical profile cut-line — orange, subtle -->
+  <line x1="14" y1="4" x2="14" y2="30"
+        stroke="#FF8A65" stroke-width="1.2" opacity="0.75" stroke-dasharray="2,2"/>
+
+  <!-- Measurement arrow tip at cut-line top -->
+  <polygon points="14,3  11.5,7  16.5,7" fill="#FF8A65" opacity="0.85"/>
+</svg>
