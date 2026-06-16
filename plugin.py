@@ -190,6 +190,14 @@ def _raster_type_pix(size: int = 14) -> QPixmap:
     return pix
 
 
+def _prune_mid(name: str, max_len: int = 28) -> str:
+    """Shorten a long label by removing the middle, keeping start and end."""
+    if len(name) <= max_len:
+        return name
+    keep = (max_len - 1) // 2
+    return name[:keep] + '…' + name[-(max_len - keep - 1):]
+
+
 def _vector_type_pix(size: int = 14) -> QPixmap:
     """Diagonal-line pixmap used as vector-layer type badge."""
     pix = QPixmap(size, size)
@@ -280,6 +288,9 @@ class _CheckCombo(QComboBox):
             if self._mdl.item(i) and self._mdl.item(i).checkState() == _CHECKED
         ]
 
+    def wheelEvent(self, e):
+        e.ignore()   # prevent accidental scroll changes
+
 
 # ---------------------------------------------------------------------------
 # Dock widget
@@ -309,6 +320,7 @@ class NormalProfileDock(QDockWidget):
         self._check_levels       = []     # user-defined static check level elevations
         self._profile_chainages  = []
         self._profile_data_store = {}
+        self._plot_cols_per_ax   = {}   # {axis_index: [col_name, ...]} in plot order
         self._pan_press_px       = None
         self._pan_xlim0          = None
         self._pan_ylim0          = None
@@ -375,12 +387,14 @@ class NormalProfileDock(QDockWidget):
         lc.setAllowEmptyLayer(True)
         lc.setCurrentIndex(0)
         lc.layerChanged.connect(lambda _: self._trigger_update())
+        lc.wheelEvent = lambda e: e.ignore()
 
         ls_combo = QComboBox()
         ls_combo.setFixedWidth(88)
         for code, label in _LINESTYLES:
             ls_combo.addItem(label, code)
         ls_combo.currentIndexChanged.connect(self._refresh_plot)
+        ls_combo.wheelEvent = lambda e: e.ignore()
 
         hex_c = self._next_color()
         row['color'] = QColor(hex_c)
@@ -859,6 +873,7 @@ class NormalProfileDock(QDockWidget):
     # ------------------------------------------------------------------ axes / figure
 
     def _reset_axes(self):
+        self._plot_cols_per_ax = {}
         all_p = [self.ax] + self._extra_axes
         for i, ax_i in enumerate(all_p):
             ax_i.clear()
@@ -1254,18 +1269,14 @@ class NormalProfileDock(QDockWidget):
                 except Exception:
                     pass
 
-        self.canvas_plot.draw_idle()
-
-        pt_xy = self.profile_geom.interpolate(ch).asPoint()
-        self._hover_band.reset(_POINT_GEOM)
-        self._hover_band.addPoint(QgsPointXY(pt_xy))
-
-        if self._profile_chainages and hasattr(self, 'lbl_hover'):
-            arr = np.array(self._profile_chainages)
-            i = int(np.searchsorted(arr, ch))
-            i = min(max(i, 0), len(arr) - 1)
-            if i > 0 and abs(arr[i - 1] - ch) < abs(arr[i] - ch):
-                i -= 1
+        # Chainage lookup — used for both legend live values and bottom bar
+        _hi = None
+        if self._profile_chainages and self._profile_data_store:
+            _arr = np.array(self._profile_chainages)
+            _hi  = int(np.searchsorted(_arr, ch))
+            _hi  = min(max(_hi, 0), len(_arr) - 1)
+            if _hi > 0 and abs(_arr[_hi - 1] - ch) < abs(_arr[_hi] - ch):
+                _hi -= 1
 
             def _fv(v):
                 if v is None: return None
@@ -1273,25 +1284,52 @@ class NormalProfileDock(QDockWidget):
                     f = float(v); return f if np.isfinite(f) else None
                 except (TypeError, ValueError): return None
 
-            parts = [f'Ch: {ch:.2f} m']
-            y1_key = self.cutfill_y1.currentText() if self.cutfill_cb.isChecked() else None
-            y2_key = self.cutfill_y2.currentText() if self.cutfill_cb.isChecked() else None
-            y1_val = y2_val = None
-            for col, vals in self._profile_data_store.items():
-                v = _fv(vals[i])
-                lbl = col if len(col) <= 14 else col[:13] + '…'
-                tag = ''
-                if col == y1_key: tag = ' [Y1]'; y1_val = v
-                elif col == y2_key: tag = ' [Y2]'; y2_val = v
-                parts.append(f'{lbl}{tag}: {v:.3f} m' if v is not None
-                              else f'{lbl}{tag}: NoData')
-            if y1_key and y2_key and y1_key != y2_key:
-                if y1_val is not None and y2_val is not None:
-                    diff = y2_val - y1_val
-                    parts.append(f'ΔY (Y2−Y1): {"+" if diff >= 0 else ""}{diff:.3f} m')
-                else:
-                    parts.append('ΔY (Y2−Y1): NoData')
-            self.lbl_hover.setText('   │   '.join(parts))
+            # Update live values in legend texts for every profile window
+            _all_p = [self.ax] + self._extra_axes
+            for _j, _ax in enumerate(_all_p):
+                _lgd = _ax.get_legend()
+                if _lgd is None:
+                    continue
+                _cols  = self._plot_cols_per_ax.get(_j, [])
+                _texts = _lgd.get_texts()
+                for _k, _col in enumerate(_cols):
+                    if _k >= len(_texts):
+                        break
+                    _vals = self._profile_data_store.get(_col, [])
+                    _v    = _fv(_vals[_hi]) if _hi < len(_vals) else None
+                    _vs   = f'{_v:.3f}' if _v is not None else '—'
+                    _texts[_k].set_text(f'{_prune_mid(_col)} [{_vs}]')
+
+        self.canvas_plot.draw_idle()
+
+        pt_xy = self.profile_geom.interpolate(ch).asPoint()
+        self._hover_band.reset(_POINT_GEOM)
+        self._hover_band.addPoint(QgsPointXY(pt_xy))
+
+        if _hi is not None and hasattr(self, 'lbl_hover'):
+            # Bottom bar only when cut/fill or cross-section analysis is active
+            if self.cutfill_cb.isChecked() or self.xsec_cb.isChecked():
+                parts  = [f'Ch: {ch:.2f} m']
+                y1_key = self.cutfill_y1.currentText() if self.cutfill_cb.isChecked() else None
+                y2_key = self.cutfill_y2.currentText() if self.cutfill_cb.isChecked() else None
+                y1_val = y2_val = None
+                for col, vals in self._profile_data_store.items():
+                    v   = _fv(vals[_hi])
+                    lbl = _prune_mid(col, 16)
+                    tag = ''
+                    if col == y1_key: tag = ' [Y1]'; y1_val = v
+                    elif col == y2_key: tag = ' [Y2]'; y2_val = v
+                    parts.append(f'{lbl}{tag}: {v:.3f} m' if v is not None
+                                  else f'{lbl}{tag}: NoData')
+                if y1_key and y2_key and y1_key != y2_key:
+                    if y1_val is not None and y2_val is not None:
+                        diff = y2_val - y1_val
+                        parts.append(f'ΔY (Y2−Y1): {"+" if diff >= 0 else ""}{diff:.3f} m')
+                    else:
+                        parts.append('ΔY (Y2−Y1): NoData')
+                self.lbl_hover.setText('   │   '.join(parts))
+            else:
+                self.lbl_hover.setText('')
 
     def _on_chart_leave(self, event):
         self._hide_hover()
@@ -1337,6 +1375,21 @@ class NormalProfileDock(QDockWidget):
                 pass
 
         if MATPLOTLIB_AVAILABLE:
+            # Reset legend texts to plain names (strip live values)
+            try:
+                _all_p = [self.ax] + self._extra_axes
+                for _j, _ax in enumerate(_all_p):
+                    _lgd = _ax.get_legend()
+                    if _lgd is None:
+                        continue
+                    _cols  = self._plot_cols_per_ax.get(_j, [])
+                    _texts = _lgd.get_texts()
+                    for _k, _col in enumerate(_cols):
+                        if _k >= len(_texts):
+                            break
+                        _texts[_k].set_text(_prune_mid(_col))
+            except Exception:
+                pass
             self.canvas_plot.draw_idle()
         if hasattr(self, 'lbl_hover'):
             self.lbl_hover.setText('')
@@ -1359,6 +1412,7 @@ class NormalProfileDock(QDockWidget):
         lc.setAllowEmptyLayer(True)
         lc.setCurrentIndex(0)
         lc.layerChanged.connect(lambda _: self._trigger_update())
+        lc.wheelEvent = lambda e: e.ignore()
         rm = _rm_btn('Remove vector layer')
         rm.clicked.connect(lambda: self._remove_vector_row(vec))
         hdr.addWidget(lc, 1); hdr.addWidget(rm)
@@ -1404,11 +1458,13 @@ class NormalProfileDock(QDockWidget):
             lambda _: self._run() if self._active_tab == 1 and self.profile_geom is not None
             else self._trigger_update()
         )
+        fc.wheelEvent = lambda e: e.ignore()
         ls_combo = QComboBox()
         ls_combo.setFixedWidth(88)
         for code, label in _LINESTYLES:
             ls_combo.addItem(label, code)
         ls_combo.currentIndexChanged.connect(self._refresh_plot)
+        ls_combo.wheelEvent = lambda e: e.ignore()
         c_btn = _color_btn(hex_c)
         c_btn.clicked.connect(lambda: self._pick_zfield_color(zf))
         r_btn = QPushButton('−'); r_btn.setFixedSize(22, 22)
@@ -2044,6 +2100,7 @@ class NormalProfileDock(QDockWidget):
                 cf_valid = np.isfinite(cf_y1) & np.isfinite(cf_y2)
 
         # Draw data on every active profile axis (filtered per-window assignment)
+        self._plot_cols_per_ax = {}
         for j, ax_j in enumerate(all_p):
             cfg_j    = self._win_cfgs[j] if j < len(self._win_cfgs) else None
             win_cols = set(cfg_j['col_combo'].checked_cols()) if cfg_j else set()  # empty = All
@@ -2064,9 +2121,9 @@ class NormalProfileDock(QDockWidget):
                 color = meta.get('color', QColor('#2196F3'))
                 ls    = meta.get('linestyle', '-')
                 ys    = np.array([v if v is not None else np.nan for v in vals], dtype=float)
-                lbl   = col if len(col) <= 22 else col[:21] + '…'
-                ax_j.plot(xs, ys, label=lbl, color=color.name(),
+                ax_j.plot(xs, ys, label=_prune_mid(col), color=color.name(),
                           linewidth=1.5, linestyle=ls)
+                self._plot_cols_per_ax.setdefault(j, []).append(col)
             ax_j.legend(fontsize=8, loc='best')
 
         # Per-window Y limits — each window scales to its own visible columns only
