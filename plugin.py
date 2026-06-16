@@ -499,6 +499,11 @@ class NormalProfileDock(QDockWidget):
             self.canvas_plot.draw()
         if self.btn_save_png is not None:
             self.btn_save_png.setEnabled(False)
+        is_xsec = (idx == 2)
+        if hasattr(self, '_cutfill_row'):
+            self._cutfill_row.setVisible(not is_xsec)
+        if hasattr(self, 'pw'):
+            self.pw.setVisible(not is_xsec)
         if hasattr(self, 'lbl_cutfill_ref'):
             self.lbl_cutfill_ref.setText('')
         for combo in (self.cutfill_y1, self.cutfill_y2):
@@ -622,30 +627,14 @@ class NormalProfileDock(QDockWidget):
         xs_l.addWidget(_hdr_xs)
 
         cb_row = QHBoxLayout()
-        self.cutfill_cb = QCheckBox('Enable cut/fill shading')
-        self.cutfill_cb.stateChanged.connect(self._refresh_plot)
         self.xsec_cb = QCheckBox('Enable Cross-Section')
         self.xsec_cb.stateChanged.connect(self._on_xsec_toggled)
-        cb_row.addWidget(self.cutfill_cb)
+        self.conveyance_cb = QCheckBox('Enable Conveyance Comparison')
+        self.conveyance_cb.setEnabled(False)
+        self.conveyance_cb.setToolTip('Coming soon')
         cb_row.addWidget(self.xsec_cb)
+        cb_row.addWidget(self.conveyance_cb)
         xs_l.addLayout(cb_row)
-
-        r1 = QHBoxLayout()
-        lbl1 = QLabel('Y1 (Reference):'); lbl1.setFixedWidth(95)
-        self.cutfill_y1 = QComboBox()
-        self.cutfill_y1.wheelEvent = lambda e: e.ignore()
-        r1.addWidget(lbl1); r1.addWidget(self.cutfill_y1)
-        xs_l.addLayout(r1)
-
-        r2 = QHBoxLayout()
-        lbl2 = QLabel('Y2 (Compare):'); lbl2.setFixedWidth(95)
-        self.cutfill_y2 = QComboBox()
-        self.cutfill_y2.wheelEvent = lambda e: e.ignore()
-        r2.addWidget(lbl2); r2.addWidget(self.cutfill_y2)
-        xs_l.addLayout(r2)
-
-        self.cutfill_y1.currentIndexChanged.connect(self._refresh_plot)
-        self.cutfill_y2.currentIndexChanged.connect(self._refresh_plot)
 
         self.xsec_widget = QWidget()
         xw_l = QVBoxLayout(self.xsec_widget)
@@ -707,8 +696,31 @@ class NormalProfileDock(QDockWidget):
         tabs.currentChanged.connect(self._on_tab_changed)
         sc.addWidget(tabs)
 
-        # ---- Profile Windows group (split Y-range views) -----------------
-        pw = QGroupBox('Profile Windows (split Y-range)')
+        # ---- Cut/Fill controls (shown only for Raster and Vector tabs) ---
+        self._cutfill_row = QWidget()
+        _cf_l = QVBoxLayout(self._cutfill_row)
+        _cf_l.setContentsMargins(4, 4, 4, 2); _cf_l.setSpacing(3)
+        self.cutfill_cb = QCheckBox('Enable cut/fill shading')
+        self.cutfill_cb.stateChanged.connect(self._refresh_plot)
+        _cf_l.addWidget(self.cutfill_cb)
+        _r1 = QHBoxLayout()
+        _lbl1 = QLabel('Y1 (Reference):'); _lbl1.setFixedWidth(95)
+        self.cutfill_y1 = QComboBox()
+        self.cutfill_y1.wheelEvent = lambda e: e.ignore()
+        _r1.addWidget(_lbl1); _r1.addWidget(self.cutfill_y1)
+        _cf_l.addLayout(_r1)
+        _r2 = QHBoxLayout()
+        _lbl2 = QLabel('Y2 (Compare):'); _lbl2.setFixedWidth(95)
+        self.cutfill_y2 = QComboBox()
+        self.cutfill_y2.wheelEvent = lambda e: e.ignore()
+        _r2.addWidget(_lbl2); _r2.addWidget(self.cutfill_y2)
+        _cf_l.addLayout(_r2)
+        self.cutfill_y1.currentIndexChanged.connect(self._refresh_plot)
+        self.cutfill_y2.currentIndexChanged.connect(self._refresh_plot)
+        sc.addWidget(self._cutfill_row)
+
+        # ---- Profile Windows group (shown only for Raster and Vector tabs)
+        self.pw = pw = QGroupBox('Profile Windows (split Y-range)')
         pw_l = QVBoxLayout(pw)
         pw_l.setContentsMargins(4, 10, 4, 4)
         pw_l.setSpacing(3)
@@ -1332,7 +1344,7 @@ class NormalProfileDock(QDockWidget):
         if (elev is not None and self._xsec_fill_data
                 and self._xsec_xs_w is not None and self._xsec_z_top is not None):
             e_cap    = min(elev, self._xsec_z_top)
-            cutfill  = self.cutfill_cb.isChecked()
+            cutfill  = True  # always shade in cross-section view
             for fc in self._xsec_fill_cols:
                 try:
                     fc.remove()
@@ -1400,10 +1412,11 @@ class NormalProfileDock(QDockWidget):
 
         if _hi is not None and hasattr(self, 'lbl_hover'):
             # Bottom bar only when cut/fill or cross-section analysis is active
-            if self.cutfill_cb.isChecked() or self.xsec_cb.isChecked():
+            _cutfill_on = (self._active_tab != 2 and self.cutfill_cb.isChecked())
+            if _cutfill_on or self.xsec_cb.isChecked():
                 parts  = [f'Ch: {ch:.2f} m']
-                y1_key = self.cutfill_y1.currentText() if self.cutfill_cb.isChecked() else None
-                y2_key = self.cutfill_y2.currentText() if self.cutfill_cb.isChecked() else None
+                y1_key = self.cutfill_y1.currentText() if _cutfill_on else None
+                y2_key = self.cutfill_y2.currentText() if _cutfill_on else None
                 y1_val = y2_val = None
                 for col, vals in self._profile_data_store.items():
                     v   = _fv(vals[_hi])
@@ -1452,7 +1465,7 @@ class NormalProfileDock(QDockWidget):
                 except Exception:
                     pass
             self._xsec_fill_cols = []
-            cutfill = self.cutfill_cb.isChecked()
+            cutfill = True  # always shade in cross-section view
             for fd in self._xsec_fill_data:
                 fc = self._draw_layer_fill(
                     self._xsec_xs_w, fd['z_w'], self._xsec_z_top,
@@ -2003,7 +2016,7 @@ class NormalProfileDock(QDockWidget):
 
         xs_w    = xs[mask]
         idx_win = np.where(mask)[0]
-        cutfill_active = self.cutfill_cb.isChecked()
+        cutfill_active = True  # always shade in cross-section view
 
         # --- Resolve layer keys --------------------------------------------------
         y1_key = self.cutfill_y1.currentText() if self.cutfill_y1.count() > 0 else ''
@@ -2249,7 +2262,8 @@ class NormalProfileDock(QDockWidget):
                     self.xsec_to.blockSignals(False)
 
         # Prepare cut/fill arrays once (used on all profile axes)
-        cutfill_active = (self.cutfill_cb.isChecked()
+        cutfill_active = (self._active_tab != 2
+                          and self.cutfill_cb.isChecked()
                           and self.cutfill_y1.count() > 0
                           and self.cutfill_y2.count() > 0)
         cf_y1 = cf_y2 = cf_valid = None
