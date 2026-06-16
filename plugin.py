@@ -500,12 +500,8 @@ class NormalProfileDock(QDockWidget):
         if self.btn_save_png is not None:
             self.btn_save_png.setEnabled(False)
         is_xsec = (idx == 2)
-        if hasattr(self, '_cutfill_row'):
-            self._cutfill_row.setVisible(not is_xsec)
         if hasattr(self, 'pw'):
             self.pw.setVisible(not is_xsec)
-        if hasattr(self, 'lbl_cutfill_ref'):
-            self.lbl_cutfill_ref.setText('')
         for combo in (self.cutfill_y1, self.cutfill_y2):
             combo.blockSignals(True)
             combo.clear()
@@ -636,6 +632,21 @@ class NormalProfileDock(QDockWidget):
         cb_row.addWidget(self.conveyance_cb)
         xs_l.addLayout(cb_row)
 
+        _xs_r1 = QHBoxLayout()
+        _xs_lbl1 = QLabel('Surface 1:'); _xs_lbl1.setFixedWidth(72)
+        self.cutfill_y1 = QComboBox()
+        self.cutfill_y1.wheelEvent = lambda e: e.ignore()
+        _xs_r1.addWidget(_xs_lbl1); _xs_r1.addWidget(self.cutfill_y1)
+        xs_l.addLayout(_xs_r1)
+        _xs_r2 = QHBoxLayout()
+        _xs_lbl2 = QLabel('Surface 2:'); _xs_lbl2.setFixedWidth(72)
+        self.cutfill_y2 = QComboBox()
+        self.cutfill_y2.wheelEvent = lambda e: e.ignore()
+        _xs_r2.addWidget(_xs_lbl2); _xs_r2.addWidget(self.cutfill_y2)
+        xs_l.addLayout(_xs_r2)
+        self.cutfill_y1.currentIndexChanged.connect(self._refresh_plot)
+        self.cutfill_y2.currentIndexChanged.connect(self._refresh_plot)
+
         self.xsec_widget = QWidget()
         xw_l = QVBoxLayout(self.xsec_widget)
         xw_l.setContentsMargins(12, 2, 0, 2); xw_l.setSpacing(2)
@@ -695,29 +706,6 @@ class NormalProfileDock(QDockWidget):
         self._tabs = tabs
         tabs.currentChanged.connect(self._on_tab_changed)
         sc.addWidget(tabs)
-
-        # ---- Cut/Fill controls (shown only for Raster and Vector tabs) ---
-        self._cutfill_row = QWidget()
-        _cf_l = QVBoxLayout(self._cutfill_row)
-        _cf_l.setContentsMargins(4, 4, 4, 2); _cf_l.setSpacing(3)
-        self.cutfill_cb = QCheckBox('Enable cut/fill shading')
-        self.cutfill_cb.stateChanged.connect(self._refresh_plot)
-        _cf_l.addWidget(self.cutfill_cb)
-        _r1 = QHBoxLayout()
-        _lbl1 = QLabel('Y1 (Reference):'); _lbl1.setFixedWidth(95)
-        self.cutfill_y1 = QComboBox()
-        self.cutfill_y1.wheelEvent = lambda e: e.ignore()
-        _r1.addWidget(_lbl1); _r1.addWidget(self.cutfill_y1)
-        _cf_l.addLayout(_r1)
-        _r2 = QHBoxLayout()
-        _lbl2 = QLabel('Y2 (Compare):'); _lbl2.setFixedWidth(95)
-        self.cutfill_y2 = QComboBox()
-        self.cutfill_y2.wheelEvent = lambda e: e.ignore()
-        _r2.addWidget(_lbl2); _r2.addWidget(self.cutfill_y2)
-        _cf_l.addLayout(_r2)
-        self.cutfill_y1.currentIndexChanged.connect(self._refresh_plot)
-        self.cutfill_y2.currentIndexChanged.connect(self._refresh_plot)
-        sc.addWidget(self._cutfill_row)
 
         # ---- Profile Windows group (shown only for Raster and Vector tabs)
         self.pw = pw = QGroupBox('Profile Windows (split Y-range)')
@@ -783,11 +771,30 @@ class NormalProfileDock(QDockWidget):
             row2.addStretch()
             pw_l.addLayout(row2)
 
+            # Row 4: per-window cut/fill shading
+            row_cf = QHBoxLayout()
+            row_cf.addSpacing(20)
+            cf_cb = QCheckBox('Cut/fill')
+            cf_cb.stateChanged.connect(self._refresh_plot)
+            row_cf.addWidget(cf_cb)
+            row_cf.addWidget(QLabel('Y1:'))
+            cf_y1 = QComboBox(); cf_y1.wheelEvent = lambda e: e.ignore()
+            cf_y1.currentIndexChanged.connect(self._refresh_plot)
+            row_cf.addWidget(cf_y1, 1)
+            row_cf.addWidget(QLabel('Y2:'))
+            cf_y2 = QComboBox(); cf_y2.wheelEvent = lambda e: e.ignore()
+            cf_y2.currentIndexChanged.connect(self._refresh_plot)
+            row_cf.addWidget(cf_y2, 1)
+            pw_l.addLayout(row_cf)
+
             self._win_cfgs.append({
                 'enabled_cb': en_cb, 'auto_cb': auto_cb,
                 'ymin': ymin_sp,    'ymax': ymax_sp,
                 'name_edit': name_edit,
                 'col_combo': col_combo,
+                'cutfill_cb': cf_cb,
+                'cf_y1':      cf_y1,
+                'cf_y2':      cf_y2,
             })
 
         sc.addWidget(pw)
@@ -858,15 +865,6 @@ class NormalProfileDock(QDockWidget):
         # _setup_chart_dock() is called from initGui() after both docks are
         # registered with iface, which is the correct moment to call
         # iface.addDockWidget for the second (chart) window.
-        self.lbl_cutfill_ref = QLabel('')
-        self.lbl_cutfill_ref.setStyleSheet(
-            'font-size:10px;font-style:italic;'
-        )
-        self.lbl_hover = QLabel('')
-        self.lbl_hover.setStyleSheet(
-            'font-size:10px;font-family:monospace;'
-        )
-        self.lbl_hover.setWordWrap(True)
         self._nav_toolbar = None
 
         if MATPLOTLIB_AVAILABLE:
@@ -913,8 +911,6 @@ class NormalProfileDock(QDockWidget):
                 'Install via OSGeo4W shell: pip install matplotlib'
             ))
 
-        plot_outer.addWidget(self.lbl_cutfill_ref)
-        plot_outer.addWidget(self.lbl_hover)
         chart_dock.setWidget(plot_root)
         self._chart_dock_widget = chart_dock
 
@@ -932,6 +928,7 @@ class NormalProfileDock(QDockWidget):
 
     def _reset_axes(self):
         self._plot_cols_per_ax = {}
+        self._cf_ann_texts = {}
         all_p = [self.ax] + self._extra_axes
         for i, ax_i in enumerate(all_p):
             ax_i.clear()
@@ -1126,6 +1123,20 @@ class NormalProfileDock(QDockWidget):
         for cfg in self._win_cfgs:
             cb = cfg['col_combo']
             cb.populate(col_names, keep_checked=cb.checked_cols())
+            win_cols = cb.checked_cols() or list(col_names)
+            for combo in (cfg['cf_y1'], cfg['cf_y2']):
+                cur = combo.currentText()
+                combo.blockSignals(True)
+                combo.clear()
+                for n in win_cols:
+                    combo.addItem(n)
+                idx = combo.findText(cur)
+                combo.setCurrentIndex(max(0, idx) if idx >= 0 else 0)
+                combo.blockSignals(False)
+            if cfg['cf_y2'].count() >= 2 and cfg['cf_y2'].currentIndex() == 0:
+                cfg['cf_y2'].blockSignals(True)
+                cfg['cf_y2'].setCurrentIndex(1)
+                cfg['cf_y2'].blockSignals(False)
 
     def _refresh_cutfill_combos(self, col_names):
         first_fill = self.cutfill_y1.count() == 0
@@ -1219,8 +1230,6 @@ class NormalProfileDock(QDockWidget):
             self._xsec_hline   = None
             self._reset_axes()
             self.canvas_plot.draw()
-        if hasattr(self, 'lbl_cutfill_ref'):
-            self.lbl_cutfill_ref.setText('')
         if self.btn_save_png is not None:
             self.btn_save_png.setEnabled(False)
         self.lbl_status.setText('')
@@ -1410,31 +1419,30 @@ class NormalProfileDock(QDockWidget):
         self._hover_band.reset(_POINT_GEOM)
         self._hover_band.addPoint(QgsPointXY(pt_xy))
 
-        if _hi is not None and hasattr(self, 'lbl_hover'):
-            # Bottom bar only when cut/fill or cross-section analysis is active
-            _cutfill_on = (self._active_tab != 2 and self.cutfill_cb.isChecked())
-            if _cutfill_on or self.xsec_cb.isChecked():
-                parts  = [f'Ch: {ch:.2f} m']
-                y1_key = self.cutfill_y1.currentText() if _cutfill_on else None
-                y2_key = self.cutfill_y2.currentText() if _cutfill_on else None
-                y1_val = y2_val = None
-                for col, vals in self._profile_data_store.items():
-                    v   = _fv(vals[_hi])
-                    lbl = _prune_mid(col, 16)
-                    tag = ''
-                    if col == y1_key: tag = ' [Y1]'; y1_val = v
-                    elif col == y2_key: tag = ' [Y2]'; y2_val = v
-                    parts.append(f'{lbl}{tag}: {v:.3f} m' if v is not None
-                                  else f'{lbl}{tag}: NoData')
-                if y1_key and y2_key and y1_key != y2_key:
-                    if y1_val is not None and y2_val is not None:
-                        diff = y2_val - y1_val
-                        parts.append(f'ΔY (Y2−Y1): {"+" if diff >= 0 else ""}{diff:.3f} m')
+        if _hi is not None:
+            # Per-window ΔY annotation (shown inside the plot axes, not in a bottom bar)
+            _all_p2 = [self.ax] + self._extra_axes
+            for _j2, _ax2 in enumerate(_all_p2):
+                _ann = self._cf_ann_texts.get(_j2)
+                _cfg2 = self._win_cfgs[_j2] if _j2 < len(self._win_cfgs) else None
+                if _ann is None or _cfg2 is None:
+                    continue
+                if (self._active_tab != 2 and _cfg2['cutfill_cb'].isChecked()
+                        and _cfg2['cf_y1'].count() > 0 and _cfg2['cf_y2'].count() > 0):
+                    _y1k = _cfg2['cf_y1'].currentText()
+                    _y2k = _cfg2['cf_y2'].currentText()
+                    _y1l = self._profile_data_store.get(_y1k, [])
+                    _y2l = self._profile_data_store.get(_y2k, [])
+                    _y1v = _fv(_y1l[_hi]) if _hi < len(_y1l) else None
+                    _y2v = _fv(_y2l[_hi]) if _hi < len(_y2l) else None
+                    if _y1v is not None and _y2v is not None:
+                        _diff = _y2v - _y1v
+                        _ann.set_text(f'ΔY: {_diff:+.3f} m')
+                        _ann.set_visible(True)
                     else:
-                        parts.append('ΔY (Y2−Y1): NoData')
-                self.lbl_hover.setText('   │   '.join(parts))
-            else:
-                self.lbl_hover.setText('')
+                        _ann.set_visible(False)
+                else:
+                    _ann.set_visible(False)
 
     def _on_chart_leave(self, event):
         self._hide_hover()
@@ -1496,8 +1504,9 @@ class NormalProfileDock(QDockWidget):
             except Exception:
                 pass
             self.canvas_plot.draw_idle()
-        if hasattr(self, 'lbl_hover'):
-            self.lbl_hover.setText('')
+        for _ann in getattr(self, '_cf_ann_texts', {}).values():
+            try: _ann.set_visible(False)
+            except Exception: pass
 
     # ------------------------------------------------------------------ vector rows
 
@@ -1616,7 +1625,9 @@ class NormalProfileDock(QDockWidget):
         self._trigger_update()
 
     def _add_zfield_row(self, vec):
-        hex_c = self._next_color()
+        _auto_ls = ['-', '--', ':', '-.']
+        _pos  = len(vec['z_fields'])
+        hex_c = vec['z_fields'][0]['color'].name() if _pos > 0 else self._next_color()
         zf = {'color': QColor(hex_c), '_col': None}
         w = QWidget()
         h = QHBoxLayout(w); h.setContentsMargins(0, 0, 0, 0); h.setSpacing(3)
@@ -1640,10 +1651,13 @@ class NormalProfileDock(QDockWidget):
         ls_combo.setFixedWidth(88)
         for code, label in _LINESTYLES:
             ls_combo.addItem(label, code)
+        _default_ls = _auto_ls[_pos] if _pos < len(_auto_ls) else '-'
+        _ls_idx = next((i for i, (c, _) in enumerate(_LINESTYLES) if c == _default_ls), 0)
+        ls_combo.setCurrentIndex(_ls_idx)
         ls_combo.currentIndexChanged.connect(self._refresh_plot)
         ls_combo.wheelEvent = lambda e: e.ignore()
         c_btn = _color_btn(hex_c)
-        c_btn.clicked.connect(lambda: self._pick_zfield_color(zf))
+        c_btn.clicked.connect(lambda: self._pick_zfield_color(vec, zf))
         r_btn = QPushButton('−'); r_btn.setFixedSize(22, 22)
         r_btn.setStyleSheet('color:#E53935;font-weight:bold;font-size:16px;')
         r_btn.clicked.connect(lambda: self._remove_zfield_row(vec, zf))
@@ -1662,13 +1676,13 @@ class NormalProfileDock(QDockWidget):
         zf['widget'].setParent(None); zf['widget'].deleteLater()
         self._trigger_update()
 
-    def _pick_zfield_color(self, zf):
+    def _pick_zfield_color(self, vec, zf):
         c = QColorDialog.getColor(zf['color'], self)
         if c.isValid():
-            zf['color'] = c
-            zf['color_btn'].setStyleSheet(
-                f'background-color:{c.name()};border:1px solid #888;border-radius:2px;'
-            )
+            _style = f'background-color:{c.name()};border:1px solid #888;border-radius:2px;'
+            for _z in vec['z_fields']:
+                _z['color'] = c
+                _z['color_btn'].setStyleSheet(_style)
             self._refresh_plot()
 
     # ------------------------------------------------------------------ CSV / PNG / run
@@ -2261,35 +2275,40 @@ class NormalProfileDock(QDockWidget):
                     self.xsec_to.setValue(max_ch)
                     self.xsec_to.blockSignals(False)
 
-        # Prepare cut/fill arrays once (used on all profile axes)
-        cutfill_active = (self._active_tab != 2
-                          and self.cutfill_cb.isChecked()
-                          and self.cutfill_y1.count() > 0
-                          and self.cutfill_y2.count() > 0)
-        cf_y1 = cf_y2 = cf_valid = None
-        if cutfill_active:
-            y1_key = self.cutfill_y1.currentText()
-            y2_key = self.cutfill_y2.currentText()
-            if y1_key in profile_data and y2_key in profile_data and y1_key != y2_key:
-                cf_y1 = np.array([v if v is not None else np.nan
-                                   for v in profile_data[y1_key]], dtype=float)
-                cf_y2 = np.array([v if v is not None else np.nan
-                                   for v in profile_data[y2_key]], dtype=float)
-                cf_valid = np.isfinite(cf_y1) & np.isfinite(cf_y2)
-
         # Draw data on every active profile axis (filtered per-window assignment)
         self._plot_cols_per_ax = {}
+        self._cf_ann_texts = {}
         for j, ax_j in enumerate(all_p):
             cfg_j    = self._win_cfgs[j] if j < len(self._win_cfgs) else None
             win_cols = set(cfg_j['col_combo'].checked_cols()) if cfg_j else set()  # empty = All
 
-            if cf_y1 is not None and cf_valid is not None:
-                ax_j.fill_between(xs, cf_y1, cf_y2, where=cf_valid & (cf_y2 > cf_y1),
-                                   color='#F44336', alpha=0.20, interpolate=True,
-                                   label='Fill (Y2 > Y1)')
-                ax_j.fill_between(xs, cf_y1, cf_y2, where=cf_valid & (cf_y2 < cf_y1),
-                                   color='#1565C0', alpha=0.20, interpolate=True,
-                                   label='Cut (Y2 < Y1)')
+            # Per-window cut/fill shading (not applicable in X-Section tab)
+            if (self._active_tab != 2 and cfg_j is not None
+                    and cfg_j['cutfill_cb'].isChecked()
+                    and cfg_j['cf_y1'].count() > 0 and cfg_j['cf_y2'].count() > 0):
+                _y1k = cfg_j['cf_y1'].currentText()
+                _y2k = cfg_j['cf_y2'].currentText()
+                if _y1k in profile_data and _y2k in profile_data and _y1k != _y2k:
+                    _cf1 = np.array([v if v is not None else np.nan
+                                     for v in profile_data[_y1k]], dtype=float)
+                    _cf2 = np.array([v if v is not None else np.nan
+                                     for v in profile_data[_y2k]], dtype=float)
+                    _cfv = np.isfinite(_cf1) & np.isfinite(_cf2)
+                    ax_j.fill_between(xs, _cf1, _cf2, where=_cfv & (_cf2 > _cf1),
+                                       color='#F44336', alpha=0.20, interpolate=True)
+                    ax_j.fill_between(xs, _cf1, _cf2, where=_cfv & (_cf2 < _cf1),
+                                       color='#1565C0', alpha=0.20, interpolate=True)
+
+            # ΔY annotation (shown on hover, hidden until mouse enters)
+            _ann = ax_j.text(
+                0.99, 0.98, '', transform=ax_j.transAxes,
+                fontsize=8, ha='right', va='top', color='#D32F2F',
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                          alpha=0.8, edgecolor='none'),
+                visible=False, zorder=20,
+            )
+            self._cf_ann_texts[j] = _ann
+
             for col, vals in profile_data.items():
                 if win_cols and col not in win_cols:
                     continue   # skip columns not assigned to this window
@@ -2423,17 +2442,8 @@ class NormalProfileDock(QDockWidget):
         self._profile_data_store = {k: list(v) for k, v in profile_data.items()}
         self._xsec_dd = d_d
 
-        if hasattr(self, 'lbl_cutfill_ref'):
-            if self.cutfill_cb.isChecked():
-                def _sh(s, n=18): return s if len(s) <= n else s[:n - 1] + '…'
-                self.lbl_cutfill_ref.setText(
-                    f'Cut/Fill: Y2 [{_sh(self.cutfill_y2.currentText())}]'
-                    f'  −  Y1 [{_sh(self.cutfill_y1.currentText())}]'
-                )
-            else:
-                self.lbl_cutfill_ref.setText('')
-
-        self._refresh_cutfill_combos(keys)
+        if self._active_tab == 2:
+            self._refresh_cutfill_combos(keys)
         self._update_win_col_combos(keys)
 
         try:
