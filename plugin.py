@@ -167,7 +167,7 @@ def _rm_btn(tip: str = 'Remove') -> QPushButton:
     b = QPushButton('×')
     b.setFixedSize(22, 22)
     b.setToolTip(tip)
-    b.setStyleSheet('color:#B71C1C;font-weight:bold;font-size:13px;')
+    b.setStyleSheet('color:#E53935;font-weight:bold;font-size:13px;')
     return b
 
 
@@ -517,7 +517,7 @@ class NormalProfileDock(QDockWidget):
         self._raster_layout = QVBoxLayout()
         self._raster_layout.setSpacing(3)
         add_r = QPushButton('+ Add Raster Layer')
-        add_r.setStyleSheet('color:#1565C0;font-size:11px;border:none;padding:2px;')
+        add_r.setStyleSheet('color:#2196F3;font-size:11px;border:none;padding:2px;')
         add_r.clicked.connect(self._add_raster_row)
         self._raster_layout.addWidget(add_r)
         rt_l.addLayout(self._raster_layout)
@@ -539,7 +539,7 @@ class NormalProfileDock(QDockWidget):
         self._vector_layout = QVBoxLayout()
         self._vector_layout.setSpacing(4)
         add_v = QPushButton('+ Add Vector Layer')
-        add_v.setStyleSheet('color:#2E7D32;font-size:11px;border:none;padding:2px;')
+        add_v.setStyleSheet('color:#43A047;font-size:11px;border:none;padding:2px;')
         add_v.clicked.connect(self._add_vector_row)
         self._vector_layout.addWidget(add_v)
         vt_l.addLayout(self._vector_layout)
@@ -615,7 +615,7 @@ class NormalProfileDock(QDockWidget):
             xw_l.addLayout(row)
 
         self.lbl_dd = QLabel('Base datum (d-d): — auto —')
-        self.lbl_dd.setStyleSheet('font-size:10px;color:#546E7A;font-style:italic;')
+        self.lbl_dd.setStyleSheet('font-size:10px;font-style:italic;')
         xw_l.addWidget(self.lbl_dd)
 
         # ---- Check levels ------------------------------------------------
@@ -774,11 +774,11 @@ class NormalProfileDock(QDockWidget):
         # iface.addDockWidget for the second (chart) window.
         self.lbl_cutfill_ref = QLabel('')
         self.lbl_cutfill_ref.setStyleSheet(
-            'font-size:10px;color:#616161;font-style:italic;'
+            'font-size:10px;font-style:italic;'
         )
         self.lbl_hover = QLabel('')
         self.lbl_hover.setStyleSheet(
-            'font-size:10px;font-family:monospace;color:#424242;'
+            'font-size:10px;font-family:monospace;'
         )
         self.lbl_hover.setWordWrap(True)
         self._nav_toolbar = None
@@ -1041,7 +1041,7 @@ class NormalProfileDock(QDockWidget):
             self._map_tool.reset()
             self.canvas.setMapTool(self._map_tool)
             self.lbl_line.setText('Click to add vertices — right-click to finish…')
-            self.lbl_line.setStyleSheet('color:#E65100;font-style:italic;font-size:11px;')
+            self.lbl_line.setStyleSheet('color:#FB8C00;font-style:italic;font-size:11px;')
         else:
             if self.canvas.mapTool() is self._map_tool:
                 self.canvas.unsetMapTool(self._map_tool)
@@ -1057,7 +1057,7 @@ class NormalProfileDock(QDockWidget):
         self._perm_band.setWidth(2)
         self._perm_band.setToGeometry(geom, None)
         self.lbl_line.setText(f'Profile line: {geom.length():.2f} m — ready.')
-        self.lbl_line.setStyleSheet('color:#1B5E20;font-style:italic;font-size:11px;')
+        self.lbl_line.setStyleSheet('color:#43A047;font-style:italic;font-size:11px;')
         self.btn_draw.setChecked(False)
         self._toggle_digitizing(False)
         if self._active_tab == 0:
@@ -1352,7 +1352,7 @@ class NormalProfileDock(QDockWidget):
         fl.addWidget(zf_widget)
 
         add_z = QPushButton('+ Add Z-field')
-        add_z.setStyleSheet('color:#2E7D32;font-size:10px;border:none;')
+        add_z.setStyleSheet('color:#43A047;font-size:10px;border:none;')
         add_z.clicked.connect(lambda: self._add_zfield_row(vec))
         zf_layout.addWidget(add_z)
 
@@ -1391,7 +1391,7 @@ class NormalProfileDock(QDockWidget):
         c_btn = _color_btn(hex_c)
         c_btn.clicked.connect(lambda: self._pick_zfield_color(zf))
         r_btn = QPushButton('−'); r_btn.setFixedSize(22, 22)
-        r_btn.setStyleSheet('color:#B71C1C;font-weight:bold;font-size:16px;')
+        r_btn.setStyleSheet('color:#E53935;font-weight:bold;font-size:16px;')
         r_btn.clicked.connect(lambda: self._remove_zfield_row(vec, zf))
         h.addWidget(tog); h.addWidget(badge)
         h.addWidget(QLabel('Z:')); h.addWidget(fc, 1)
