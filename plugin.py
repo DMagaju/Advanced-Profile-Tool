@@ -653,6 +653,8 @@ class NormalProfileDock(QDockWidget):
         pw_l.setContentsMargins(4, 10, 4, 4)
         pw_l.setSpacing(3)
 
+        _default_win_names = ['Elevation [masl]', 'Depth [m]', 'Velocity [m/s]']
+
         self._win_cfgs = []
         for i in range(3):
             row = QHBoxLayout()
@@ -687,7 +689,18 @@ class NormalProfileDock(QDockWidget):
             row.addStretch()
             pw_l.addLayout(row)
 
-            # Row 2: data/layer assignment for this window
+            # Row 2: window name (used as Y-axis label)
+            row_name = QHBoxLayout()
+            row_name.addSpacing(20)
+            row_name.addWidget(QLabel('Name:'))
+            name_edit = QLineEdit(_default_win_names[i])
+            name_edit.setPlaceholderText('Y-axis label')
+            name_edit.setFixedHeight(22)
+            name_edit.textChanged.connect(self._refresh_plot)
+            row_name.addWidget(name_edit, 1)
+            pw_l.addLayout(row_name)
+
+            # Row 3: data/layer assignment for this window
             row2 = QHBoxLayout()
             row2.addSpacing(20)
             row2.addWidget(QLabel('Data:'))
@@ -701,6 +714,7 @@ class NormalProfileDock(QDockWidget):
             self._win_cfgs.append({
                 'enabled_cb': en_cb, 'auto_cb': auto_cb,
                 'ymin': ymin_sp,    'ymax': ymax_sp,
+                'name_edit': name_edit,
                 'col_combo': col_combo,
             })
 
@@ -848,7 +862,9 @@ class NormalProfileDock(QDockWidget):
         all_p = [self.ax] + self._extra_axes
         for i, ax_i in enumerate(all_p):
             ax_i.clear()
-            ax_i.set_ylabel('Z value', fontsize=9)
+            cfg_i    = self._win_cfgs[i] if i < len(self._win_cfgs) else None
+            win_name = cfg_i['name_edit'].text().strip() if cfg_i else ''
+            ax_i.set_ylabel(win_name or 'Z value', fontsize=9)
             ax_i.grid(True, alpha=0.3)
             ax_i.tick_params(labelsize=8)
             if i < len(all_p) - 1:
@@ -1067,7 +1083,9 @@ class NormalProfileDock(QDockWidget):
             self._run()
 
     def _clear_line(self):
-        self.profile_geom = None
+        self.profile_geom        = None
+        self._profile_chainages  = []
+        self._profile_data_store = {}
         if self._perm_band:
             self.canvas.scene().removeItem(self._perm_band)
             self._perm_band = None
@@ -1382,7 +1400,10 @@ class NormalProfileDock(QDockWidget):
         except Exception: pass
         fc.setLayer(vec['layer_combo'].currentLayer())
         vec['layer_combo'].layerChanged.connect(fc.setLayer)
-        fc.fieldChanged.connect(lambda _: self._trigger_update())
+        fc.fieldChanged.connect(
+            lambda _: self._run() if self._active_tab == 1 and self.profile_geom is not None
+            else self._trigger_update()
+        )
         ls_combo = QComboBox()
         ls_combo.setFixedWidth(88)
         for code, label in _LINESTYLES:
