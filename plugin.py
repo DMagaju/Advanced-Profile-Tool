@@ -46,9 +46,11 @@ except AttributeError:
     _EXPAND = QSizePolicy.Expanding  # type: ignore[attr-defined]
 
 try:
-    _RIGHT_DOCK = Qt.DockWidgetArea.RightDockWidgetArea
+    _RIGHT_DOCK  = Qt.DockWidgetArea.RightDockWidgetArea
+    _BOTTOM_DOCK = Qt.DockWidgetArea.BottomDockWidgetArea
 except AttributeError:
-    _RIGHT_DOCK = Qt.RightDockWidgetArea  # type: ignore[attr-defined]
+    _RIGHT_DOCK  = Qt.RightDockWidgetArea   # type: ignore[attr-defined]
+    _BOTTOM_DOCK = Qt.BottomDockWidgetArea  # type: ignore[attr-defined]
 
 try:
     _LINE_GEOM    = Qgis.GeometryType.Line
@@ -875,6 +877,7 @@ class NormalProfileDock(QDockWidget):
             self.canvas_plot.setMinimumHeight(240)
             self.canvas_plot.setSizePolicy(_EXPAND, _EXPAND)
             self.canvas_plot.mpl_connect('scroll_event',         self._on_scroll_zoom)
+            self.canvas_plot.mpl_connect('resize_event',         self._on_chart_resize)
             self.canvas_plot.mpl_connect('button_press_event',   self._on_mouse_press)
             self.canvas_plot.mpl_connect('button_release_event', self._on_mouse_release)
             self.canvas_plot.mpl_connect('motion_notify_event',  self._on_chart_hover)
@@ -1443,6 +1446,18 @@ class NormalProfileDock(QDockWidget):
                         _ann.set_visible(False)
                 else:
                     _ann.set_visible(False)
+
+    def _do_tight_layout(self):
+        """Reflow the figure margins so titles/labels are never clipped."""
+        try:
+            self.figure.tight_layout(pad=1.0)
+        except Exception:
+            pass
+
+    def _on_chart_resize(self, event):
+        """Re-run tight_layout whenever the canvas is resized."""
+        self._do_tight_layout()
+        self.canvas_plot.draw_idle()
 
     def _on_chart_leave(self, event):
         self._hide_hover()
@@ -2446,13 +2461,7 @@ class NormalProfileDock(QDockWidget):
             self._refresh_cutfill_combos(keys)
         self._update_win_col_combos(keys)
 
-        try:
-            if xsec_active and self.ax_xsec is not None:
-                self.figure.tight_layout(pad=0.8, rect=[0, 0, 0.88, 1])
-            else:
-                self.figure.tight_layout(pad=0.8)
-        except Exception:
-            pass
+        self._do_tight_layout()
         self.canvas_plot.draw()
 
 
@@ -2490,7 +2499,7 @@ class FTAProfilePlugin:
         self._chart_dock.setObjectName('FTANormalProfileChart')
         self._chart_dock.setMinimumWidth(500)
         self._chart_dock.setMinimumHeight(300)
-        self.iface.addDockWidget(_RIGHT_DOCK, self._chart_dock)
+        self.iface.addDockWidget(_BOTTOM_DOCK, self._chart_dock)
         self._chart_dock.hide()
         self.dock._setup_chart_dock(self._chart_dock)
 
