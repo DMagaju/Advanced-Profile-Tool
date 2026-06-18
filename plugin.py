@@ -1381,7 +1381,7 @@ class NormalProfileDock(QDockWidget):
         lc.setFilters(_VECTOR_FILTER)
         lc.setAllowEmptyLayer(True)
         lc.setCurrentIndex(0)
-        lc.layerChanged.connect(lambda _: self._trigger_update())
+        lc.layerChanged.connect(lambda _: (self._refresh_col_previews(), self._trigger_update()))
         lc.wheelEvent = lambda e: e.ignore()
         rm = _rm_btn('Remove vector layer')
         rm.clicked.connect(lambda: self._remove_vector_row(vec))
@@ -1426,10 +1426,7 @@ class NormalProfileDock(QDockWidget):
         except Exception: pass
         fc.setLayer(vec['layer_combo'].currentLayer())
         vec['layer_combo'].layerChanged.connect(fc.setLayer)
-        fc.fieldChanged.connect(
-            lambda _: self._run() if self._active_tab == 1 and self.profile_geom is not None
-            else self._trigger_update()
-        )
+        fc.fieldChanged.connect(lambda _: self._on_zfield_changed())
         fc.wheelEvent = lambda e: e.ignore()
         ls_combo = QComboBox()
         ls_combo.setFixedWidth(88)
@@ -1453,11 +1450,27 @@ class NormalProfileDock(QDockWidget):
         layout = vec['zf_layout']
         layout.insertWidget(layout.count() - 1, w)
         vec['z_fields'].append(zf)
+        self._refresh_col_previews()
+
+    def _on_zfield_changed(self):
+        self._refresh_col_previews()
+        if self._active_tab == 1 and self.profile_geom is not None:
+            self._run()
+        else:
+            self._trigger_update()
+
+    def _refresh_col_previews(self):
+        """Update Profile Window dropdowns from current field config without running extraction."""
+        raster_entries, vector_entries, _ = self._collect_entries()
+        col_names = [col for _, col in raster_entries] + [col for _, _, col in vector_entries]
+        if col_names:
+            self._update_win_col_combos(col_names)
 
     def _remove_zfield_row(self, vec, zf):
         if len(vec['z_fields']) <= 1: return
         vec['z_fields'].remove(zf)
         zf['widget'].setParent(None); zf['widget'].deleteLater()
+        self._refresh_col_previews()
         self._trigger_update()
 
     def _pick_zfield_color(self, vec, zf):
@@ -1567,11 +1580,19 @@ class NormalProfileDock(QDockWidget):
 
         for rl, col_name in raster_entries:
             provider = rl.dataProvider()
+            nodata = (provider.sourceNoDataValue(1)
+                      if provider.sourceHasNoDataValue(1) else None)
             vals = []
             for i, pt in enumerate(pts):
                 if i % 500 == 0: QApplication.processEvents()
-                v, ok = provider.sample(pt, 1)
-                vals.append(v if ok else None)
+                try:
+                    v, ok = provider.sample(pt, 1)
+                    if ok and (nodata is None or abs(v - nodata) > 1e-6):
+                        vals.append(v)
+                    else:
+                        vals.append(None)
+                except Exception:
+                    vals.append(None)
             data[col_name] = vals
 
         lyr_fields = defaultdict(list); lyr_obj = {}
