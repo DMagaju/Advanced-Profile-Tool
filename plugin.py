@@ -352,9 +352,6 @@ class NormalProfileDock(QDockWidget):
         # Vector rows
         self._vector_rows = []
 
-        # Cross-Section tab rows (independent from Raster/Vector tabs)
-        self._xsec_raster_rows = []
-        self._xsec_vector_rows = []
 
         # Extra profile axes for split-window mode (populated by _rebuild_figure)
         self._extra_axes = []
@@ -583,126 +580,18 @@ class NormalProfileDock(QDockWidget):
         tabs.addTab(vector_tab,
                     QIcon(QPixmap(_vector_type_pix(12))), 'Vector')
 
-        # ---- Cross-Section tab — own raster+vector inputs + analysis -----
-        xsec_tab   = QWidget()
-        xs_out_l   = QVBoxLayout(xsec_tab)
-        xs_out_l.setContentsMargins(0, 0, 0, 0)
-        xs_sc = QScrollArea(); xs_sc.setWidgetResizable(True)
-        xs_sc.setFrameShape(_NO_FRAME)
-        xs_inner = QWidget()
-        xs_l = QVBoxLayout(xs_inner)
-        xs_l.setContentsMargins(4, 6, 4, 4); xs_l.setSpacing(4)
-
-        # Raster inputs
-        _hdr_r = QLabel('Raster Inputs')
-        _hdr_r.setStyleSheet('font-size:10px;font-weight:bold;')
-        xs_l.addWidget(_hdr_r)
-        self._xsec_raster_layout = QVBoxLayout()
-        self._xsec_raster_layout.setSpacing(3)
-        add_xr = QPushButton('+ Add Raster Layer')
-        add_xr.setStyleSheet('color:#2196F3;font-size:11px;border:none;padding:2px;')
-        add_xr.clicked.connect(self._add_xsec_raster_row)
-        self._xsec_raster_layout.addWidget(add_xr)
-        xs_l.addLayout(self._xsec_raster_layout)
-        xs_l.addWidget(_thin_sep())
-
-        # Vector inputs
-        _hdr_v = QLabel('Vector Inputs')
-        _hdr_v.setStyleSheet('font-size:10px;font-weight:bold;')
-        xs_l.addWidget(_hdr_v)
-        self._xsec_vector_layout = QVBoxLayout()
-        self._xsec_vector_layout.setSpacing(4)
-        add_xv = QPushButton('+ Add Vector Layer')
-        add_xv.setStyleSheet('color:#43A047;font-size:11px;border:none;padding:2px;')
-        add_xv.clicked.connect(self._add_xsec_vector_row)
-        self._xsec_vector_layout.addWidget(add_xv)
-        xs_l.addLayout(self._xsec_vector_layout)
-        xs_l.addWidget(_thin_sep())
-
-        # Cross-Section analysis controls
-        _hdr_xs = QLabel('Cross-Section Analysis')
-        _hdr_xs.setStyleSheet('font-size:10px;font-weight:bold;')
-        xs_l.addWidget(_hdr_xs)
-
-        cb_row = QHBoxLayout()
-        self.xsec_cb = QCheckBox('Enable Cross-Section')
-        self.xsec_cb.stateChanged.connect(self._on_xsec_toggled)
-        self.conveyance_cb = QCheckBox('Enable Conveyance Comparison')
-        self.conveyance_cb.setEnabled(False)
-        self.conveyance_cb.setToolTip('Coming soon')
-        cb_row.addWidget(self.xsec_cb)
-        cb_row.addWidget(self.conveyance_cb)
-        xs_l.addLayout(cb_row)
-
-        _xs_r1 = QHBoxLayout()
-        _xs_lbl1 = QLabel('Surface 1:'); _xs_lbl1.setFixedWidth(72)
-        self.cutfill_y1 = QComboBox()
-        self.cutfill_y1.wheelEvent = lambda e: e.ignore()
-        _xs_r1.addWidget(_xs_lbl1); _xs_r1.addWidget(self.cutfill_y1)
-        xs_l.addLayout(_xs_r1)
-        _xs_r2 = QHBoxLayout()
-        _xs_lbl2 = QLabel('Surface 2:'); _xs_lbl2.setFixedWidth(72)
-        self.cutfill_y2 = QComboBox()
-        self.cutfill_y2.wheelEvent = lambda e: e.ignore()
-        _xs_r2.addWidget(_xs_lbl2); _xs_r2.addWidget(self.cutfill_y2)
-        xs_l.addLayout(_xs_r2)
-        self.cutfill_y1.currentIndexChanged.connect(self._refresh_plot)
-        self.cutfill_y2.currentIndexChanged.connect(self._refresh_plot)
-
-        self.xsec_widget = QWidget()
-        xw_l = QVBoxLayout(self.xsec_widget)
-        xw_l.setContentsMargins(12, 2, 0, 2); xw_l.setSpacing(2)
-
-        self.xsec_cc = QDoubleSpinBox()
-        self.xsec_cc.setRange(-9999999, 9999999)
-        self.xsec_cc.setValue(15.0); self.xsec_cc.setDecimals(2)
-
-        for attr, label, val in [
-            ('xsec_from', 'Window from (a-a):', 0.0),
-            ('xsec_to',   'Window to  (b-b):', 100.0),
-        ]:
-            _row = QHBoxLayout()
-            _lbl = QLabel(label); _lbl.setFixedWidth(118)
-            _spin = QDoubleSpinBox()
-            _spin.setRange(-9999999, 9999999); _spin.setValue(val)
-            _spin.setDecimals(2); _spin.setFixedWidth(105)
-            _spin.valueChanged.connect(self._refresh_plot)
-            setattr(self, attr, _spin)
-            _row.addWidget(_lbl); _row.addWidget(_spin)
-            _row.addWidget(QLabel('m')); _row.addStretch()
-            xw_l.addLayout(_row)
-
-        self.lbl_dd = QLabel('Base datum (d-d): — auto —')
-        self.lbl_dd.setStyleSheet('font-size:10px;font-style:italic;')
-        xw_l.addWidget(self.lbl_dd)
-
-        xw_l.addWidget(_sep())
-        xw_l.addWidget(QLabel('Check Levels:'))
-        cl_row = QHBoxLayout()
+        # ---- X-Section tab removed — hidden stubs keep internal references valid
+        self.xsec_cb       = QCheckBox()   # always unchecked; xsec never activates
+        self.conveyance_cb = QCheckBox()
+        self.cutfill_y1    = QComboBox();  self.cutfill_y1.wheelEvent  = lambda e: e.ignore()
+        self.cutfill_y2    = QComboBox();  self.cutfill_y2.wheelEvent  = lambda e: e.ignore()
+        self.xsec_widget   = QWidget()
+        self.xsec_cc       = QDoubleSpinBox(); self.xsec_cc.setValue(15.0)
+        self.xsec_from     = QDoubleSpinBox(); self.xsec_from.setValue(0.0)
+        self.xsec_to       = QDoubleSpinBox(); self.xsec_to.setValue(100.0)
+        self.lbl_dd        = QLabel()
         self.check_level_spin = QDoubleSpinBox()
-        self.check_level_spin.setRange(-9999999, 9999999)
-        self.check_level_spin.setValue(0.0); self.check_level_spin.setDecimals(3)
-        self.check_level_spin.setFixedWidth(100)
-        cl_row.addWidget(self.check_level_spin); cl_row.addWidget(QLabel('m'))
-        btn_cl_add = QPushButton('Add'); btn_cl_add.setFixedWidth(40)
-        btn_cl_add.clicked.connect(self._add_check_level)
-        btn_cl_rem = QPushButton('Del'); btn_cl_rem.setFixedWidth(35)
-        btn_cl_rem.clicked.connect(self._remove_check_level)
-        cl_row.addWidget(btn_cl_add); cl_row.addWidget(btn_cl_rem)
-        cl_row.addStretch()
-        xw_l.addLayout(cl_row)
         self.check_level_list = QListWidget()
-        self.check_level_list.setFixedHeight(70)
-        self.check_level_list.setStyleSheet('font-size:10px;')
-        xw_l.addWidget(self.check_level_list)
-
-        self.xsec_widget.hide()
-        xs_l.addWidget(self.xsec_widget)
-        xs_l.addStretch()
-        xs_sc.setWidget(xs_inner)
-        xs_out_l.addWidget(xs_sc)
-        tabs.addTab(xsec_tab,
-                    QIcon(QPixmap(_xsec_type_pix(12))), 'X-Section')
 
         tabs.setMinimumHeight(200)
         self._tabs = tabs
@@ -813,11 +702,9 @@ class NormalProfileDock(QDockWidget):
         self.btn_clear.setFixedWidth(55)
         self.btn_clear.clicked.connect(self._clear_line)
         dr.addWidget(self.btn_draw); dr.addWidget(self.btn_clear)
-        sc.addLayout(dr)
 
         self.lbl_line = QLabel('Profile line: not drawn')
         self.lbl_line.setStyleSheet('color:gray;font-style:italic;font-size:11px;')
-        sc.addWidget(self.lbl_line)
 
         # ---- Sampling interval (OUTSIDE scroll — always visible) ----------
         iv = QHBoxLayout()
@@ -829,6 +716,10 @@ class NormalProfileDock(QDockWidget):
         self.interval_spin.setSuffix(' m')
         self.interval_spin.setFixedWidth(110)
         iv.addWidget(self.interval_spin); iv.addStretch()
+
+        # ---- Always-visible draw controls (outside scroll) ---------------
+        outer.addLayout(dr)
+        outer.addWidget(self.lbl_line)
         outer.addLayout(iv)
 
         # ---- Fixed bottom section ----------------------------------------
@@ -1032,36 +923,6 @@ class NormalProfileDock(QDockWidget):
                     'visible':   row['toggle'].isChecked(),
                     'linestyle': row['ls_combo'].currentData(),
                 }
-        elif self._active_tab == 2:
-            # Cross-Section tab: own raster + vector rows
-            for row in self._xsec_raster_rows:
-                lyr = row['layer_combo'].currentLayer()
-                if not isinstance(lyr, QgsRasterLayer):
-                    continue
-                col = uniq(lyr.name())
-                row['_col'] = col
-                raster_entries.append((lyr, col))
-                col_meta[col] = {
-                    'color':     row['color'],
-                    'visible':   row['toggle'].isChecked(),
-                    'linestyle': row['ls_combo'].currentData(),
-                }
-            for vec in self._xsec_vector_rows:
-                lyr = vec['layer_combo'].currentLayer()
-                if lyr is None:
-                    continue
-                for zf in vec['z_fields']:
-                    field = zf['combo'].currentField()
-                    if not field:
-                        continue
-                    col = uniq(f'{lyr.name()} [{field}]')
-                    zf['_col'] = col
-                    vector_entries.append((lyr, field, col))
-                    col_meta[col] = {
-                        'color':     zf['color'],
-                        'visible':   zf['toggle'].isChecked(),
-                        'linestyle': zf['ls_combo'].currentData() if 'ls_combo' in zf else '-',
-                    }
         else:
             # Vector tab: only vector rows
             for vec in self._vector_rows:
@@ -1093,22 +954,6 @@ class NormalProfileDock(QDockWidget):
                         'visible':   row['toggle'].isChecked(),
                         'linestyle': row['ls_combo'].currentData(),
                     }
-        elif self._active_tab == 2:
-            for row in self._xsec_raster_rows:
-                if row.get('_col'):
-                    meta[row['_col']] = {
-                        'color':     row['color'],
-                        'visible':   row['toggle'].isChecked(),
-                        'linestyle': row['ls_combo'].currentData(),
-                    }
-            for vec in self._xsec_vector_rows:
-                for zf in vec['z_fields']:
-                    if zf.get('_col'):
-                        meta[zf['_col']] = {
-                            'color':     zf['color'],
-                            'visible':   zf['toggle'].isChecked(),
-                            'linestyle': zf['ls_combo'].currentData() if 'ls_combo' in zf else '-',
-                        }
         else:
             for vec in self._vector_rows:
                 for zf in vec['z_fields']:
@@ -1160,7 +1005,7 @@ class NormalProfileDock(QDockWidget):
     # ------------------------------------------------------------------ triggers
 
     def _trigger_update(self):
-        if self._active_tab == 0 and self.profile_geom is not None:
+        if self._active_tab in (0, 1) and self.profile_geom is not None:
             self._on_live_update(self.profile_geom)
 
     def _add_check_level(self):
@@ -1209,11 +1054,7 @@ class NormalProfileDock(QDockWidget):
         self.lbl_line.setStyleSheet('color:#43A047;font-style:italic;font-size:11px;')
         self.btn_draw.setChecked(False)
         self._toggle_digitizing(False)
-        if self._active_tab == 0:
-            self._on_live_update(geom)
-        else:
-            # Vector / Cross-Section tabs: run on completion (not live)
-            self._run()
+        self._on_live_update(geom)  # live for both Raster and Vector tabs
 
     def _clear_line(self):
         self.profile_geom        = None
@@ -1247,7 +1088,7 @@ class NormalProfileDock(QDockWidget):
     # ------------------------------------------------------------------ live preview
 
     def _on_live_update(self, partial_geom):
-        if self._active_tab != 0:   # only raster tab does live updates
+        if self._active_tab not in (0, 1):
             return
         if self._extracting or not MATPLOTLIB_AVAILABLE:
             return
@@ -1567,78 +1408,6 @@ class NormalProfileDock(QDockWidget):
         vec['widget'].setParent(None); vec['widget'].deleteLater()
         self._trigger_update()
 
-    # ------------------------------------------------------------------ xsec rows
-
-    def _add_xsec_raster_row(self):
-        row = {'_col': None}
-        frame = QFrame()
-        frame.setStyleSheet('QFrame{border:1px solid #BDBDBD;border-radius:3px;margin-top:2px;}')
-        fl = QHBoxLayout(frame); fl.setContentsMargins(4, 3, 4, 3); fl.setSpacing(3)
-        tog = QCheckBox(); tog.setChecked(True)
-        tog.stateChanged.connect(self._refresh_plot)
-        badge = QLabel(); badge.setPixmap(_raster_type_pix(14))
-        badge.setFixedSize(16, 16); badge.setToolTip('Raster layer')
-        lc = QgsMapLayerComboBox()
-        lc.setFilters(_RASTER_FILTER); lc.setAllowEmptyLayer(True); lc.setCurrentIndex(0)
-        lc.layerChanged.connect(lambda _: self._trigger_update())
-        lc.wheelEvent = lambda e: e.ignore()
-        ls_combo = QComboBox(); ls_combo.setFixedWidth(88)
-        for code, label in _LINESTYLES:
-            ls_combo.addItem(label, code)
-        ls_combo.currentIndexChanged.connect(self._refresh_plot)
-        ls_combo.wheelEvent = lambda e: e.ignore()
-        hex_c = self._next_color(); row['color'] = QColor(hex_c)
-        c_btn = _color_btn(hex_c); c_btn.clicked.connect(lambda: self._pick_xsec_raster_color(row))
-        rm = _rm_btn('Remove'); rm.clicked.connect(lambda: self._remove_xsec_raster_row(row))
-        fl.addWidget(tog); fl.addWidget(badge); fl.addWidget(lc, 1)
-        fl.addWidget(ls_combo); fl.addWidget(c_btn); fl.addWidget(rm)
-        row.update({'widget': frame, 'toggle': tog, 'layer_combo': lc,
-                    'ls_combo': ls_combo, 'color_btn': c_btn})
-        self._xsec_raster_layout.insertWidget(self._xsec_raster_layout.count() - 1, frame)
-        self._xsec_raster_rows.append(row)
-
-    def _pick_xsec_raster_color(self, row):
-        c = QColorDialog.getColor(row['color'], self)
-        if c.isValid():
-            row['color'] = c
-            row['color_btn'].setStyleSheet(
-                f'background-color:{c.name()};border:1px solid #888;border-radius:2px;')
-            self._refresh_plot()
-
-    def _remove_xsec_raster_row(self, row):
-        self._xsec_raster_rows.remove(row)
-        row['widget'].setParent(None); row['widget'].deleteLater()
-        self._trigger_update()
-
-    def _add_xsec_vector_row(self):
-        vec = {'z_fields': []}
-        frame = QFrame()
-        frame.setStyleSheet('QFrame{border:1px solid #BDBDBD;border-radius:3px;margin-top:2px;}')
-        fl = QVBoxLayout(frame); fl.setContentsMargins(4, 4, 4, 4); fl.setSpacing(2)
-        hdr = QHBoxLayout(); hdr.addWidget(QLabel('Layer:'))
-        lc = QgsMapLayerComboBox()
-        lc.setFilters(_VECTOR_FILTER); lc.setAllowEmptyLayer(True); lc.setCurrentIndex(0)
-        lc.layerChanged.connect(lambda _: self._trigger_update())
-        lc.wheelEvent = lambda e: e.ignore()
-        rm = _rm_btn('Remove vector layer'); rm.clicked.connect(lambda: self._remove_xsec_vector_row(vec))
-        hdr.addWidget(lc, 1); hdr.addWidget(rm); fl.addLayout(hdr)
-        zf_widget = QWidget()
-        zf_layout = QVBoxLayout(zf_widget); zf_layout.setContentsMargins(0, 0, 0, 0); zf_layout.setSpacing(2)
-        fl.addWidget(zf_widget)
-        add_z = QPushButton('+ Add Z-field')
-        add_z.setStyleSheet('color:#43A047;font-size:10px;border:none;')
-        add_z.clicked.connect(lambda: self._add_zfield_row(vec))
-        zf_layout.addWidget(add_z)
-        vec.update({'widget': frame, 'layer_combo': lc, 'zf_layout': zf_layout})
-        self._xsec_vector_layout.insertWidget(self._xsec_vector_layout.count() - 1, frame)
-        self._xsec_vector_rows.append(vec)
-        self._add_zfield_row(vec)
-
-    def _remove_xsec_vector_row(self, vec):
-        self._xsec_vector_rows.remove(vec)
-        vec['widget'].setParent(None); vec['widget'].deleteLater()
-        self._trigger_update()
-
     def _add_zfield_row(self, vec):
         _auto_ls = ['-', '--', ':', '-.']
         _pos  = len(vec['z_fields'])
@@ -1658,7 +1427,7 @@ class NormalProfileDock(QDockWidget):
         fc.setLayer(vec['layer_combo'].currentLayer())
         vec['layer_combo'].layerChanged.connect(fc.setLayer)
         fc.fieldChanged.connect(
-            lambda _: self._run() if self._active_tab in (1, 2) and self.profile_geom is not None
+            lambda _: self._run() if self._active_tab == 1 and self.profile_geom is not None
             else self._trigger_update()
         )
         fc.wheelEvent = lambda e: e.ignore()
@@ -2457,8 +2226,6 @@ class NormalProfileDock(QDockWidget):
         self._profile_data_store = {k: list(v) for k, v in profile_data.items()}
         self._xsec_dd = d_d
 
-        if self._active_tab == 2:
-            self._refresh_cutfill_combos(keys)
         self._update_win_col_combos(keys)
 
         self._do_tight_layout()
