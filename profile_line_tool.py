@@ -1,3 +1,6 @@
+# __author__  = "Dipendra Magaju"
+# __licence__ = "GNU General Public License v2 or later (GPLv2+)"
+
 """
 profile_line_tool.py — Custom QGIS map tool for polyline digitizing.
 

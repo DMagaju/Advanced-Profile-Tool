@@ -1,15 +1,15 @@
 [general]
 name=Advanced Profile Tool
 qgisMinimumVersion=3.16
-description=Advanced Flood & Terrain Auditor — Normal Profile
+description=Interactive normal profile tool for raster and vector surfaces along a user-defined alignment
 version=0.5
 author=Dipendra Magaju
 email=dipen.magaju@gmail.com
-about=Extracts un-interpolated normal profiles from raster and vector surfaces along a user-defined line alignment. Draw the alignment directly on the map canvas. Part of the Advanced Flood and Terrain Auditor (FTA) suite.
-tracker=
-repository=
-tags=profile,flood,terrain,hydrology,water,DEM
-homepage=
+about=Draw a profile line directly on the map canvas and instantly extract elevation or attribute profiles from raster DEMs and vector layers. Supports multiple profile windows with independent Y-axis ranges, cut/fill shading, live preview while drawing, CSV and shapefile export, and multi-layer comparison. Built for water engineers and flood modellers.
+tracker=https://github.com/DMagaju/Advanced-Profile-Tool/issues
+repository=https://github.com/DMagaju/Advanced-Profile-Tool
+tags=profile,elevation,flood,terrain,hydrology,water,DEM,cross section,raster,vector
+homepage=https://github.com/DMagaju/Advanced-Profile-Tool
 category=Plugins
 icon=icon.svg
 experimental=True
