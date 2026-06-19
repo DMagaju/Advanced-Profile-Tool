@@ -15,7 +15,9 @@ GROUP_NAME     = 'Advanced Flood & Terrain Auditor'
 _LINKED_PROMPT = 'FTA_Normal_Profile_V01_GM.txt'
 
 import csv
+import os
 from collections import defaultdict
+from datetime import datetime
 
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
@@ -32,6 +34,7 @@ from qgis.core import (
     Qgis, QgsProject, QgsWkbTypes, QgsGeometry, QgsPointXY,
     QgsSpatialIndex, QgsFieldProxyModel, QgsMapLayerProxyModel,
     QgsRasterLayer, QgsMapLayer, QgsRectangle, QgsFeatureRequest,
+    QgsVectorFileWriter, QgsFields, QgsFeature,
 )
 
 # ---------------------------------------------------------------------------
@@ -782,12 +785,12 @@ class NormalProfileDock(QDockWidget):
         outer.addWidget(_sep())
 
         cr = QHBoxLayout()
-        cr.addWidget(QLabel('CSV (optional):'))
+        cr.addWidget(QLabel('Result Folder:'))
         self.csv_edit = QLineEdit()
-        self.csv_edit.setPlaceholderText('Output CSV path — leave blank to skip')
+        self.csv_edit.setPlaceholderText('Select folder to save results — leave blank to skip')
         btn_csv = QPushButton('...')
         btn_csv.setFixedWidth(28)
-        btn_csv.clicked.connect(self._browse_csv)
+        btn_csv.clicked.connect(self._browse_result_folder)
         cr.addWidget(self.csv_edit); cr.addWidget(btn_csv)
         outer.addLayout(cr)
 
@@ -848,10 +851,10 @@ class NormalProfileDock(QDockWidget):
                     if act.text() in ('Subplots', 'Customize', 'Save'):
                         self._nav_toolbar.removeAction(act)
                 top_bar.addWidget(self._nav_toolbar)
-            self.btn_save_png = QPushButton('Save PNG')
+            self.btn_save_png = QPushButton('Save Plot')
             self.btn_save_png.setFixedWidth(80)
             self.btn_save_png.setEnabled(False)
-            self.btn_save_png.clicked.connect(self._save_png)
+            self.btn_save_png.clicked.connect(self._save_plot)
             top_bar.addWidget(self.btn_save_png)
             plot_outer.addLayout(top_bar)
             plot_outer.addWidget(self.canvas_plot, stretch=1)
@@ -1538,21 +1541,91 @@ class NormalProfileDock(QDockWidget):
                 _z['color_btn'].setStyleSheet(_style)
             self._refresh_plot()
 
-    # ------------------------------------------------------------------ CSV / PNG / run
+    # ------------------------------------------------------------------ Save results / run
 
-    def _browse_csv(self):
-        path, _ = QFileDialog.getSaveFileName(self, 'Save Profile CSV', '', 'CSV files (*.csv)')
-        if path:
-            if not path.lower().endswith('.csv'): path += '.csv'
-            self.csv_edit.setText(path)
+    def _browse_result_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, 'Select Result Folder', '')
+        if folder:
+            self.csv_edit.setText(folder)
 
-    def _save_png(self):
-        if not MATPLOTLIB_AVAILABLE: return
-        path, _ = QFileDialog.getSaveFileName(self, 'Save Chart PNG', '', 'PNG files (*.png)')
-        if path:
-            if not path.lower().endswith('.png'): path += '.png'
-            self.figure.savefig(path, dpi=150, bbox_inches='tight')
-            self.lbl_status.setText(f'Chart saved: {path}')
+    def _cols_for_active_windows(self):
+        """Return ordered column names visible across all enabled profile windows."""
+        all_cols = list(self._profile_data_store.keys())
+        shown, seen = [], set()
+        all_p = [self.ax] + self._extra_axes
+        for j, cfg in enumerate(self._win_cfgs):
+            if j >= len(all_p):
+                break
+            if j > 0 and not cfg['enabled_cb'].isChecked():
+                continue
+            checked = cfg['col_combo'].checked_cols()
+            for c in (checked if checked else all_cols):
+                if c not in seen and c in self._profile_data_store:
+                    shown.append(c); seen.add(c)
+        return shown
+
+    def _write_result_csv(self, folder, prefix):
+        path = os.path.join(folder, f'{prefix}_data.csv')
+        cols = self._cols_for_active_windows()
+        with open(path, 'w', newline='', encoding='utf-8') as f:
+            w = csv.writer(f)
+            w.writerow(['Chainage_m'] + cols)
+            for i, ch in enumerate(self._profile_chainages):
+                row = [ch]
+                for col in cols:
+                    v = self._profile_data_store[col][i]
+                    row.append('' if v is None else round(v, 4))
+                w.writerow(row)
+        return path
+
+    def _write_profile_shp(self, folder, prefix):
+        path = os.path.join(folder, f'{prefix}_line.shp')
+        writer = QgsVectorFileWriter(
+            path, 'UTF-8', QgsFields(),
+            QgsWkbTypes.LineString,
+            QgsProject.instance().crs(),
+            'ESRI Shapefile'
+        )
+        feat = QgsFeature()
+        feat.setGeometry(self.profile_geom)
+        writer.addFeature(feat)
+        del writer
+        return path
+
+    def _save_plot(self):
+        if not MATPLOTLIB_AVAILABLE:
+            return
+        folder = self.csv_edit.text().strip()
+        if not folder:
+            QMessageBox.warning(self, 'Advanced Profile Tool',
+                'Please set a Result Folder path first.')
+            return
+        if not os.path.isdir(folder):
+            QMessageBox.warning(self, 'Advanced Profile Tool',
+                f'Result folder does not exist:\n{folder}')
+            return
+        prefix = 'profile_' + datetime.now().strftime('%Y%m%d_%H%M%S')
+        saved, errors = [], []
+        try:
+            png_path = os.path.join(folder, f'{prefix}_plot.png')
+            self.figure.savefig(png_path, dpi=150, bbox_inches='tight')
+            saved.append(f'Plot:      {png_path}')
+        except Exception as exc:
+            errors.append(f'PNG failed: {exc}')
+        try:
+            saved.append(f'Data:      {self._write_result_csv(folder, prefix)}')
+        except Exception as exc:
+            errors.append(f'CSV failed: {exc}')
+        if self.profile_geom is not None:
+            try:
+                saved.append(f'Line:      {self._write_profile_shp(folder, prefix)}')
+            except Exception as exc:
+                errors.append(f'SHP failed: {exc}')
+        self.lbl_status.setText(f'Results saved to: {folder}')
+        msg = '\n'.join(saved)
+        if errors:
+            msg += '\n\nErrors:\n' + '\n'.join(errors)
+        QMessageBox.information(self, 'Results Saved', msg)
 
     def _run(self):
         if self.profile_geom is None:
@@ -1582,30 +1655,10 @@ class NormalProfileDock(QDockWidget):
             self.lbl_status.setText('Failed — see error dialog.')
             return
 
-        csv_path = self.csv_edit.text().strip()
-        if csv_path:
-            try:
-                cols = list(profile_data.keys())
-                with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-                    w = csv.writer(f)
-                    w.writerow(['Chainage_m'] + cols)
-                    for i, ch in enumerate(chainages):
-                        row = [ch]
-                        for col in cols:
-                            v = profile_data[col][i]
-                            row.append('' if v is None else round(v, 4))
-                        w.writerow(row)
-                self.lbl_status.setText(
-                    f'Done — {len(chainages)} pts, {len(profile_data)} layer(s).\n'
-                    f'CSV: {csv_path}'
-                )
-            except Exception as exc:
-                QMessageBox.critical(self, 'FTA Profile — CSV Error', str(exc))
-                self.lbl_status.setText('Extraction OK — CSV write failed.')
-        else:
-            self.lbl_status.setText(
-                f'Done — {len(chainages)} pts, {len(profile_data)} layer(s). (No CSV)'
-            )
+        self.lbl_status.setText(
+            f'Done — {len(chainages)} pts, {len(profile_data)} layer(s). '
+            f'Click "Save Plot" to export results.'
+        )
         if MATPLOTLIB_AVAILABLE:
             self._plot(chainages, profile_data, col_meta)
             if self.btn_save_png is not None:
