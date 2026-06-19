@@ -303,6 +303,16 @@ class _CheckCombo(QComboBox):
             if self._mdl.item(i) and self._mdl.item(i).checkState() == _CHECKED
         ]
 
+    def uncheck(self, col_name):
+        """Programmatically uncheck an item by name. Returns True if it was checked."""
+        for i in range(self._mdl.rowCount()):
+            item = self._mdl.item(i)
+            if item and item.data(_USER_ROLE) == col_name and item.checkState() == _CHECKED:
+                item.setCheckState(_UNCHECKED)
+                self._refresh_text()
+                return True
+        return False
+
     def wheelEvent(self, e):
         e.ignore()   # prevent accidental scroll changes
 
@@ -470,6 +480,22 @@ class NormalProfileDock(QDockWidget):
         auto   = cfg['auto_cb'].isChecked()
         cfg['ymin'].setEnabled(win_on and not auto)
         cfg['ymax'].setEnabled(win_on and not auto)
+        self._refresh_plot()
+
+    def _on_win_col_changed(self, src_i):
+        """When a column is checked in window src_i, uncheck it from all other windows."""
+        if getattr(self, '_win_col_updating', False):
+            return
+        self._win_col_updating = True
+        try:
+            checked = self._win_cfgs[src_i]['col_combo'].checked_cols()
+            for j, cfg in enumerate(self._win_cfgs):
+                if j == src_i:
+                    continue
+                for col in checked:
+                    cfg['col_combo'].uncheck(col)
+        finally:
+            self._win_col_updating = False
         self._refresh_plot()
 
     def _on_tab_changed(self, idx):
@@ -657,7 +683,7 @@ class NormalProfileDock(QDockWidget):
             row2.addWidget(QLabel('Data:'))
             col_combo = _CheckCombo()
             col_combo.setToolTip('Check columns to show in this window; nothing checked = All')
-            col_combo.selectionChanged.connect(self._refresh_plot)
+            col_combo.selectionChanged.connect(lambda _idx=i: self._on_win_col_changed(_idx))
             row2.addWidget(col_combo, 1)
             row2.addStretch()
             pw_l.addLayout(row2)
