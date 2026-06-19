@@ -313,6 +313,20 @@ class _CheckCombo(QComboBox):
                 return True
         return False
 
+    def check_all_except(self, exclude_set):
+        """Switch from All-mode to explicit selection, excluding named columns."""
+        changed = False
+        for i in range(self._mdl.rowCount()):
+            item = self._mdl.item(i)
+            if item is None:
+                continue
+            want = _UNCHECKED if item.data(_USER_ROLE) in exclude_set else _CHECKED
+            if item.checkState() != want:
+                item.setCheckState(want)
+                changed = True
+        if changed:
+            self._refresh_text()
+
     def wheelEvent(self, e):
         e.ignore()   # prevent accidental scroll changes
 
@@ -483,17 +497,27 @@ class NormalProfileDock(QDockWidget):
         self._refresh_plot()
 
     def _on_win_col_changed(self, src_i):
-        """When a column is checked in window src_i, uncheck it from all other windows."""
+        """When columns are checked in window src_i, remove them from all other windows.
+        If another window is in All-mode (nothing checked), switch it to explicit mode
+        keeping everything except the claimed columns."""
         if getattr(self, '_win_col_updating', False):
             return
         self._win_col_updating = True
         try:
-            checked = self._win_cfgs[src_i]['col_combo'].checked_cols()
+            claimed = set(self._win_cfgs[src_i]['col_combo'].checked_cols())
+            if not claimed:
+                # Source unchecked everything — went back to All-mode, nothing to claim
+                return
             for j, cfg in enumerate(self._win_cfgs):
                 if j == src_i:
                     continue
-                for col in checked:
-                    cfg['col_combo'].uncheck(col)
+                combo = cfg['col_combo']
+                if not combo.checked_cols():
+                    # Window is in All-mode: switch to explicit, exclude claimed cols
+                    combo.check_all_except(claimed)
+                else:
+                    for col in claimed:
+                        combo.uncheck(col)
         finally:
             self._win_col_updating = False
         self._refresh_plot()
