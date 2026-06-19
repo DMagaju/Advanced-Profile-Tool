@@ -8,6 +8,12 @@ Stage-Area side subplot with proper Elevation (m AD) axis; no duplicate legend.
 Live chart preview; hover sync to map canvas; scroll zoom; middle-mouse pan.
 """
 
+__version__    = '0.5'
+TOOL_ID        = 'fta_profile_tool'
+DISPLAY_NAME   = 'FTA Profile Tool'
+GROUP_NAME     = 'Advanced Flood & Terrain Auditor'
+_LINKED_PROMPT = 'FTA_Normal_Profile_V01_GM.txt'
+
 import csv
 from collections import defaultdict
 
