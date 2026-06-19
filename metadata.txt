@@ -1,5 +1,5 @@
 [general]
-name=FTA Profile Tool
+name=Advanced Profile Tool
 qgisMinimumVersion=3.16
 description=Advanced Flood & Terrain Auditor — Normal Profile
 version=0.5

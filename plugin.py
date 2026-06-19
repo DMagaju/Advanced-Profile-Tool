@@ -1,5 +1,5 @@
 """
-plugin.py — FTA Profile Tool dock plugin.
+plugin.py — Advanced Profile Tool dock plugin.
 
 Raster layers auto-populated from QGIS project via QListWidget (checkable).
 Cross-Section Analysis: cut/fill shading + hydraulic area engine (Riemann sum).
@@ -10,7 +10,7 @@ Live chart preview; hover sync to map canvas; scroll zoom; middle-mouse pan.
 
 __version__    = '0.5'
 TOOL_ID        = 'fta_profile_tool'
-DISPLAY_NAME   = 'FTA Profile Tool'
+DISPLAY_NAME   = 'Advanced Profile Tool'
 GROUP_NAME     = 'Advanced Flood & Terrain Auditor'
 _LINKED_PROMPT = 'FTA_Normal_Profile_V01_GM.txt'
 
@@ -344,7 +344,7 @@ class _CheckCombo(QComboBox):
 class NormalProfileDock(QDockWidget):
 
     def __init__(self, iface, parent=None):
-        super().__init__('Normal Profile V01', parent)
+        super().__init__('Advanced Profile Tool', parent)
         self.iface  = iface
         self.canvas = iface.mapCanvas()
 
@@ -2329,7 +2329,7 @@ class FTAProfilePlugin:
         _icon = QIcon(_icon_path) if _os.path.exists(_icon_path) else QIcon()
         self.action = QAction(_icon, 'Normal Profile', self.iface.mainWindow())
         self.action.setCheckable(True)
-        self.action.setToolTip('FTA — Normal Profile V01')
+        self.action.setToolTip('Advanced Profile Tool')
         self.action.triggered.connect(self._toggle_dock)
         self.toolbar.addAction(self.action)
         self.iface.addPluginToMenu('&FTA Tools', self.action)
