@@ -28,7 +28,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel, QDoubleSpinBox, QPushButton, QLineEdit,
     QFileDialog, QGroupBox, QFrame, QSizePolicy, QMessageBox,
     QApplication, QCheckBox, QComboBox, QColorDialog, QScrollArea,
-    QListWidget, QListWidgetItem, QTabWidget,
+    QListWidget, QListWidgetItem, QTabWidget, QInputDialog, QProgressBar,
 )
 from qgis.PyQt.QtGui import QColor, QIcon, QPixmap, QPainter, QPen, QStandardItem, QStandardItemModel
 
@@ -147,6 +147,8 @@ _LINESTYLES = [
     (':',  'Dotted · · ·'),
     ('-.', 'Dash-dot -·-'),
 ]
+
+_BLUE = '#1565C0'
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +378,17 @@ class NormalProfileDock(QDockWidget):
         self._pan_xlim0          = None
         self._pan_ylim0          = None
         self._pan_transform      = None
+
+        # Sketch tool state
+        self._sketch_mode       = None    # 'pen' | 'line' | 'arrow' | 'text' | 'rect' | None
+        self._sketch_color      = '#E53935'
+        self._sketch_objects    = []      # all sketch artists, for bulk clear
+        self._sketch_press_data = None    # (xdata, ydata) at mouse-press
+        self._sketch_current    = None    # in-progress artist tuple (varies by mode)
+        self._sketch_pen_pts    = ([], [])
+        self._sketch_pressed    = False
+        self._sketch_btns       = {}      # {mode: QPushButton}
+        self._sketch_color_btn  = None    # active-color swatch
         self._color_idx          = 0
         self._has_xsec_plot      = False
         self._xsec_dd            = None
@@ -551,6 +564,8 @@ class NormalProfileDock(QDockWidget):
         self.lbl_line.setText('Profile line: not drawn')
         self.lbl_line.setStyleSheet('color:gray;font-style:italic;font-size:11px;')
         self.lbl_status.setText('')
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
         self._hide_hover()
         if MATPLOTLIB_AVAILABLE:
             self._cursor_lines = []
@@ -815,6 +830,41 @@ class NormalProfileDock(QDockWidget):
         self.lbl_status.setStyleSheet('font-size:11px;')
         outer.addWidget(self.lbl_status)
 
+        # ---- Footer (progress + version strip) ---------------------------
+        footer = QWidget()
+        footer.setStyleSheet(
+            'QWidget { background: #ECEFF1; border-top: 1px solid #CFD8DC; }'
+        )
+        fl = QVBoxLayout(footer)
+        fl.setContentsMargins(14, 8, 14, 10)
+        fl.setSpacing(5)
+
+        self.progress = QProgressBar()
+        self.progress.setFixedHeight(6)
+        self.progress.setTextVisible(False)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setStyleSheet(
+            'QProgressBar { background: #CFD8DC; border-radius: 3px; border: none; }'
+            f'QProgressBar::chunk {{ background: {_BLUE}; border-radius: 3px; }}'
+        )
+        fl.addWidget(self.progress)
+
+        try:
+            _qgis_ver = Qgis.QGIS_VERSION.split('-')[0]
+        except Exception:
+            _qgis_ver = '—'
+        ver_lbl = QLabel(
+            f'Developer: D Magaju   ·   Version: {__version__}   ·   QGIS: {_qgis_ver}'
+        )
+        ver_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter
+                             if hasattr(Qt, 'AlignmentFlag') else Qt.AlignCenter)
+        ver_lbl.setStyleSheet('font-size: 9px; color: #90A4AE; background: transparent;'
+                              ' border: none;')
+        fl.addWidget(ver_lbl)
+
+        outer.addWidget(footer)
+
         # ---- Chart widgets — layout deferred to _setup_chart_dock() -------
         # Created here so _plot, _hide_hover etc can reference them any time.
         # _setup_chart_dock() is called from initGui() after both docks are
@@ -860,6 +910,78 @@ class NormalProfileDock(QDockWidget):
             self.btn_save_png.clicked.connect(self._save_plot)
             top_bar.addWidget(self.btn_save_png)
             plot_outer.addLayout(top_bar)
+
+            # ── Sketch toolbar ────────────────────────────────────────────────
+            _sk_bar = QHBoxLayout()
+            _sk_bar.setSpacing(3)
+            _sk_bar.setContentsMargins(4, 1, 4, 1)
+
+            _sk_lbl = QLabel('Sketch:')
+            _sk_lbl.setStyleSheet('font-size:10px; color:#546E7A;')
+            _sk_bar.addWidget(_sk_lbl)
+
+            _SKETCH_TOOLS = [
+                ('pen',   'Pen',   'Freehand pen — click and drag'),
+                ('line',  'Line',  'Straight line — click and drag'),
+                ('arrow', '→',     'Arrow — drag from tail to head'),
+                ('text',  'Text',  'Text annotation — click to place'),
+                ('rect',  'Rect',  'Rectangle — click and drag'),
+            ]
+            for _mode, _label, _tip in _SKETCH_TOOLS:
+                _sb = QPushButton(_label)
+                _sb.setCheckable(True)
+                _sb.setFixedSize(38, 22)
+                _sb.setToolTip(_tip)
+                _sb.setStyleSheet(
+                    'QPushButton{font-size:10px;border:1px solid #B0BEC5;'
+                    'border-radius:3px;background:#FAFAFA;}'
+                    'QPushButton:checked{background:#1565C0;color:white;border-color:#1565C0;}'
+                    'QPushButton:hover:!checked{background:#E3F2FD;}'
+                )
+                _sb.clicked.connect(
+                    lambda chk, m=_mode: self._sketch_activate(m) if chk else self._sketch_deactivate()
+                )
+                _sk_bar.addWidget(_sb)
+                self._sketch_btns[_mode] = _sb
+
+            _sk_bar.addSpacing(6)
+
+            # Preset colour swatches
+            for _hc, _ct in [('#E53935', 'Red'), ('#1565C0', 'Blue'),
+                              ('#2E7D32', 'Green'), ('#000000', 'Black'),
+                              ('#FF8C00', 'Orange')]:
+                _cb = QPushButton()
+                _cb.setFixedSize(18, 18)
+                _cb.setToolTip(_ct)
+                _cb.setStyleSheet(
+                    f'background:{_hc};border:1px solid #888;border-radius:2px;'
+                )
+                _cb.clicked.connect(lambda _, c=_hc: self._sketch_set_color(c))
+                _sk_bar.addWidget(_cb)
+
+            # Custom colour picker swatch
+            self._sketch_color_btn = QPushButton()
+            self._sketch_color_btn.setFixedSize(22, 18)
+            self._sketch_color_btn.setToolTip('Custom colour…')
+            self._sketch_color_btn.setStyleSheet(
+                f'background:{self._sketch_color};border:2px solid #555;border-radius:2px;'
+            )
+            self._sketch_color_btn.clicked.connect(self._sketch_pick_color)
+            _sk_bar.addWidget(self._sketch_color_btn)
+
+            _sk_bar.addStretch()
+
+            _btn_clr = QPushButton('Clear')
+            _btn_clr.setFixedSize(45, 22)
+            _btn_clr.setToolTip('Remove all sketch annotations')
+            _btn_clr.setStyleSheet(
+                'font-size:10px;border:1px solid #EF9A9A;border-radius:3px;'
+                'background:#FFF3F3;color:#C62828;'
+            )
+            _btn_clr.clicked.connect(self._sketch_clear)
+            _sk_bar.addWidget(_btn_clr)
+
+            plot_outer.addLayout(_sk_bar)
             plot_outer.addWidget(self.canvas_plot, stretch=1)
         else:
             plot_outer.addWidget(QLabel(
@@ -883,6 +1005,9 @@ class NormalProfileDock(QDockWidget):
     # ------------------------------------------------------------------ axes / figure
 
     def _reset_axes(self):
+        self._sketch_objects = []
+        self._sketch_current = None
+        self._sketch_pressed = False
         self._plot_cols_per_ax = {}
         self._cf_ann_texts = {}
         all_p = [self.ax] + self._extra_axes
@@ -1179,11 +1304,22 @@ class NormalProfileDock(QDockWidget):
             self._pan_xlim0     = self.ax.get_xlim()
             self._pan_ylim0     = self.ax.get_ylim()
             self._pan_transform = self.ax.transData.inverted().frozen()
+            return
+        if (event.button == 1 and self._sketch_mode is not None
+                and event.inaxes is not None
+                and event.xdata is not None and event.ydata is not None):
+            self._sketch_on_press(event)
 
     def _on_mouse_release(self, event):
         if event.button == 2:
             self._pan_press_px = self._pan_xlim0 = \
                 self._pan_ylim0 = self._pan_transform = None
+        if event.button == 1 and self._sketch_pressed:
+            self._sketch_pressed    = False
+            self._sketch_current    = None
+            self._sketch_press_data = None
+            self._sketch_pen_pts    = ([], [])
+            self.canvas_plot.draw_idle()
 
     def _on_scroll_zoom(self, event):
         all_p = [self.ax] + self._extra_axes
@@ -1202,6 +1338,12 @@ class NormalProfileDock(QDockWidget):
 
     def _on_chart_hover(self, event):
         if not MATPLOTLIB_AVAILABLE:
+            return
+
+        # Sketch tool motion (suppress hover cursor while drawing)
+        if (self._sketch_pressed and self._sketch_mode is not None
+                and event.xdata is not None and event.ydata is not None):
+            self._sketch_on_motion(event)
             return
 
         # Middle-mouse pan
@@ -1426,6 +1568,139 @@ class NormalProfileDock(QDockWidget):
             try: _ann.set_visible(False)
             except Exception: pass
 
+    # ------------------------------------------------------------------ sketch tool
+
+    def _sketch_activate(self, mode):
+        for m, btn in self._sketch_btns.items():
+            btn.setChecked(m == mode)
+        self._sketch_mode = mode
+        try:
+            self.canvas_plot.setCursor(Qt.CursorShape.CrossCursor)
+        except AttributeError:
+            self.canvas_plot.setCursor(Qt.CrossCursor)
+
+    def _sketch_deactivate(self):
+        for btn in self._sketch_btns.values():
+            btn.setChecked(False)
+        self._sketch_mode    = None
+        self._sketch_pressed = False
+        self._sketch_current = None
+        self.canvas_plot.unsetCursor()
+
+    def _sketch_set_color(self, hex_color):
+        self._sketch_color = hex_color
+        if self._sketch_color_btn:
+            self._sketch_color_btn.setStyleSheet(
+                f'background:{hex_color};border:2px solid #555;border-radius:2px;'
+            )
+
+    def _sketch_pick_color(self):
+        col = QColorDialog.getColor(QColor(self._sketch_color))
+        if col.isValid():
+            self._sketch_set_color(col.name())
+
+    def _sketch_clear(self):
+        for obj in self._sketch_objects:
+            try:
+                obj.remove()
+            except Exception:
+                pass
+        self._sketch_objects.clear()
+        self._sketch_current  = None
+        self._sketch_pressed  = False
+        if MATPLOTLIB_AVAILABLE:
+            self.canvas_plot.draw_idle()
+
+    def _sketch_on_press(self, event):
+        self._sketch_pressed    = True
+        self._sketch_press_data = (event.xdata, event.ydata)
+        ax = event.inaxes
+
+        if self._sketch_mode == 'pen':
+            self._sketch_pen_pts = ([event.xdata], [event.ydata])
+            line, = ax.plot(
+                self._sketch_pen_pts[0], self._sketch_pen_pts[1],
+                color=self._sketch_color, linewidth=2,
+                solid_capstyle='round', solid_joinstyle='round', zorder=10
+            )
+            self._sketch_current = (line, ax)
+            self._sketch_objects.append(line)
+
+        elif self._sketch_mode == 'line':
+            line, = ax.plot(
+                [event.xdata, event.xdata], [event.ydata, event.ydata],
+                color=self._sketch_color, linewidth=2,
+                solid_capstyle='round', zorder=10
+            )
+            self._sketch_current = (line, ax)
+            self._sketch_objects.append(line)
+
+        elif self._sketch_mode == 'arrow':
+            ann = ax.annotate(
+                '', xy=(event.xdata, event.ydata),
+                xytext=(event.xdata, event.ydata),
+                arrowprops=dict(arrowstyle='->', color=self._sketch_color, lw=2),
+                zorder=10
+            )
+            self._sketch_current = (ann, ax)
+            self._sketch_objects.append(ann)
+
+        elif self._sketch_mode == 'rect':
+            rect = _MplRect(
+                (event.xdata, event.ydata), 0, 0,
+                linewidth=2, edgecolor=self._sketch_color,
+                facecolor='none', zorder=10
+            )
+            ax.add_patch(rect)
+            self._sketch_current = (rect, ax, event.xdata, event.ydata)
+            self._sketch_objects.append(rect)
+
+        elif self._sketch_mode == 'text':
+            self._sketch_pressed = False
+            text, ok = QInputDialog.getText(
+                self.canvas_plot, 'Add Annotation', 'Text:')
+            if ok and text.strip():
+                ann = ax.text(
+                    event.xdata, event.ydata, text.strip(),
+                    color=self._sketch_color, fontsize=9, fontweight='bold',
+                    zorder=10,
+                    bbox=dict(boxstyle='round,pad=0.25', facecolor='white',
+                              edgecolor=self._sketch_color, alpha=0.85)
+                )
+                self._sketch_objects.append(ann)
+                self.canvas_plot.draw_idle()
+            return
+
+        self.canvas_plot.draw_idle()
+
+    def _sketch_on_motion(self, event):
+        if not self._sketch_current:
+            return
+        x, y = event.xdata, event.ydata
+
+        if self._sketch_mode == 'pen':
+            line, ax = self._sketch_current
+            self._sketch_pen_pts[0].append(x)
+            self._sketch_pen_pts[1].append(y)
+            line.set_data(self._sketch_pen_pts[0], self._sketch_pen_pts[1])
+
+        elif self._sketch_mode == 'line':
+            line, ax = self._sketch_current
+            x0, y0 = self._sketch_press_data
+            line.set_data([x0, x], [y0, y])
+
+        elif self._sketch_mode == 'arrow':
+            ann, ax = self._sketch_current
+            ann.xy = (x, y)
+
+        elif self._sketch_mode == 'rect':
+            rect, ax, x0, y0 = self._sketch_current
+            rect.set_xy((min(x0, x), min(y0, y)))
+            rect.set_width(abs(x - x0))
+            rect.set_height(abs(y - y0))
+
+        self.canvas_plot.draw_idle()
+
     # ------------------------------------------------------------------ vector rows
 
     def _add_vector_row(self):
@@ -1645,6 +1920,7 @@ class NormalProfileDock(QDockWidget):
                 'Switch to a Projected Metric CRS first.')
             return
         self.btn_run.setEnabled(False)
+        self.progress.setRange(0, 0)  # indeterminate while running
         self.lbl_status.setText('Running…')
         QApplication.processEvents()
         try:
@@ -1655,6 +1931,8 @@ class NormalProfileDock(QDockWidget):
         except Exception as exc:
             QMessageBox.critical(self, 'FTA Profile Error', str(exc))
             self.btn_run.setEnabled(True)
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
             self.lbl_status.setText('Failed — see error dialog.')
             return
 
@@ -1662,6 +1940,8 @@ class NormalProfileDock(QDockWidget):
             f'Done — {len(chainages)} pts, {len(profile_data)} layer(s). '
             f'Click "Save Plot" to export results.'
         )
+        self.progress.setRange(0, 100)
+        self.progress.setValue(100)
         if MATPLOTLIB_AVAILABLE:
             self._plot(chainages, profile_data, col_meta)
             if self.btn_save_png is not None:
