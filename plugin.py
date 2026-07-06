@@ -114,7 +114,7 @@ except AttributeError:
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
     from matplotlib.figure import Figure
-    from matplotlib.patches import Rectangle as _MplRect
+    from matplotlib.patches import Rectangle as _MplRect, Ellipse as _MplEllipse
     from matplotlib.transforms import blended_transform_factory as _blended_tf
     import matplotlib.path as _mpath
     import numpy as np
@@ -387,8 +387,10 @@ class NormalProfileDock(QDockWidget):
         self._sketch_current    = None    # in-progress artist tuple (varies by mode)
         self._sketch_pen_pts    = ([], [])
         self._sketch_pressed    = False
-        self._sketch_btns       = {}      # {mode: QPushButton}
-        self._sketch_color_btn  = None    # active-color swatch
+        self._sketch_btns        = {}      # {mode: QPushButton}
+        self._sketch_color_btn   = None    # active-color swatch
+        self._sketch_drag_target = None    # text artist being moved in 'move' mode
+        self._sketch_drag_offset = (0, 0)  # data-space offset at grab point
         self._color_idx          = 0
         self._has_xsec_plot      = False
         self._xsec_dd            = None
@@ -921,11 +923,14 @@ class NormalProfileDock(QDockWidget):
             _sk_bar.addWidget(_sk_lbl)
 
             _SKETCH_TOOLS = [
-                ('pen',   'Pen',   'Freehand pen — click and drag'),
-                ('line',  'Line',  'Straight line — click and drag'),
-                ('arrow', '→',     'Arrow — drag from tail to head'),
-                ('text',  'Text',  'Text annotation — click to place'),
-                ('rect',  'Rect',  'Rectangle — click and drag'),
+                ('pen',    'Pen',    'Freehand pen — click and drag'),
+                ('line',   'Line',   'Straight line — click and drag'),
+                ('arrow',  '→',      'Arrow — drag from tail to head'),
+                ('text',   'Text',   'Text annotation — click to place'),
+                ('rect',   'Rect',   'Rectangle — click and drag'),
+                ('circle', '○',      'Circle / Ellipse — drag from centre; hold Shift for perfect circle'),
+                ('eraser', '✕',      'Eraser — click or drag over annotations to remove'),
+                ('move',   '⇔',      'Move text — click and drag a text annotation to reposition'),
             ]
             for _mode, _label, _tip in _SKETCH_TOOLS:
                 _sb = QPushButton(_label)
@@ -1315,10 +1320,11 @@ class NormalProfileDock(QDockWidget):
             self._pan_press_px = self._pan_xlim0 = \
                 self._pan_ylim0 = self._pan_transform = None
         if event.button == 1 and self._sketch_pressed:
-            self._sketch_pressed    = False
-            self._sketch_current    = None
-            self._sketch_press_data = None
-            self._sketch_pen_pts    = ([], [])
+            self._sketch_pressed     = False
+            self._sketch_current     = None
+            self._sketch_press_data  = None
+            self._sketch_pen_pts     = ([], [])
+            self._sketch_drag_target = None
             self.canvas_plot.draw_idle()
 
     def _on_scroll_zoom(self, event):
@@ -1575,9 +1581,13 @@ class NormalProfileDock(QDockWidget):
             btn.setChecked(m == mode)
         self._sketch_mode = mode
         try:
-            self.canvas_plot.setCursor(Qt.CursorShape.CrossCursor)
+            _cs = Qt.CursorShape
+            _cur = {'move': _cs.SizeAllCursor, 'eraser': _cs.ForbiddenCursor
+                    }.get(mode, _cs.CrossCursor)
         except AttributeError:
-            self.canvas_plot.setCursor(Qt.CrossCursor)
+            _cur = {'move': Qt.SizeAllCursor, 'eraser': Qt.ForbiddenCursor  # type: ignore
+                    }.get(mode, Qt.CrossCursor)  # type: ignore
+        self.canvas_plot.setCursor(_cur)
 
     def _sketch_deactivate(self):
         for btn in self._sketch_btns.values():
@@ -1610,6 +1620,22 @@ class NormalProfileDock(QDockWidget):
         self._sketch_pressed  = False
         if MATPLOTLIB_AVAILABLE:
             self.canvas_plot.draw_idle()
+
+    def _sketch_erase_at(self, event):
+        """Remove the topmost sketch object under the cursor."""
+        for obj in reversed(self._sketch_objects):
+            try:
+                hit, _ = obj.contains(event)
+            except Exception:
+                hit = False
+            if hit:
+                try:
+                    obj.remove()
+                except Exception:
+                    pass
+                self._sketch_objects.remove(obj)
+                self.canvas_plot.draw_idle()
+                break
 
     def _sketch_on_press(self, event):
         self._sketch_pressed    = True
@@ -1671,10 +1697,48 @@ class NormalProfileDock(QDockWidget):
                 self.canvas_plot.draw_idle()
             return
 
+        elif self._sketch_mode == 'circle':
+            if not MATPLOTLIB_AVAILABLE:
+                return
+            ellipse = _MplEllipse(
+                (event.xdata, event.ydata), 0, 0,
+                linewidth=2, edgecolor=self._sketch_color,
+                facecolor='none', zorder=10
+            )
+            ax.add_patch(ellipse)
+            self._sketch_current = (ellipse, ax, event.xdata, event.ydata)
+            self._sketch_objects.append(ellipse)
+
+        elif self._sketch_mode == 'eraser':
+            self._sketch_erase_at(event)
+            self._sketch_pressed = True  # keep pressed so drag-erase works
+            return
+
+        elif self._sketch_mode == 'move':
+            self._sketch_drag_target = None
+            for obj in reversed(self._sketch_objects):
+                # Only text objects with visible content are movable (not arrow annotations)
+                if not (hasattr(obj, 'get_position') and hasattr(obj, 'set_position')
+                        and hasattr(obj, 'get_text') and obj.get_text()):
+                    continue
+                try:
+                    hit, _ = obj.contains(event)
+                except Exception:
+                    hit = False
+                if hit:
+                    pos = obj.get_position()
+                    self._sketch_drag_target = obj
+                    self._sketch_drag_offset = (pos[0] - event.xdata,
+                                                pos[1] - event.ydata)
+                    break
+            self._sketch_pressed = self._sketch_drag_target is not None
+            return
+
         self.canvas_plot.draw_idle()
 
     def _sketch_on_motion(self, event):
-        if not self._sketch_current:
+        _no_current_ok = self._sketch_mode in ('eraser', 'move')
+        if not self._sketch_current and not _no_current_ok:
             return
         x, y = event.xdata, event.ydata
 
@@ -1698,6 +1762,24 @@ class NormalProfileDock(QDockWidget):
             rect.set_xy((min(x0, x), min(y0, y)))
             rect.set_width(abs(x - x0))
             rect.set_height(abs(y - y0))
+
+        elif self._sketch_mode == 'circle':
+            ellipse, ax, x0, y0 = self._sketch_current
+            dx = abs(x - x0)
+            dy = abs(y - y0)
+            if event.key == 'shift':
+                dx = dy = max(dx, dy)
+            ellipse.set_width(2 * dx)
+            ellipse.set_height(2 * dy)
+
+        elif self._sketch_mode == 'eraser':
+            self._sketch_erase_at(event)
+            return
+
+        elif self._sketch_mode == 'move':
+            if self._sketch_drag_target is not None:
+                ox, oy = self._sketch_drag_offset
+                self._sketch_drag_target.set_position((x + ox, y + oy))
 
         self.canvas_plot.draw_idle()
 
