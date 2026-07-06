@@ -391,6 +391,10 @@ class NormalProfileDock(QDockWidget):
         self._sketch_color_btn   = None    # active-color swatch
         self._sketch_drag_target = None    # text artist being moved in 'move' mode
         self._sketch_drag_offset = (0, 0)  # data-space offset at grab point
+        self._sketch_lw          = 2.0     # line width (pt)
+        self._sketch_ls          = '-'     # line style: '-' '--' ':' '-.'
+        self._sketch_lw_spin     = None    # widget ref
+        self._sketch_ls_combo    = None    # widget ref
         self._color_idx          = 0
         self._has_xsec_plot      = False
         self._xsec_dd            = None
@@ -913,7 +917,7 @@ class NormalProfileDock(QDockWidget):
             top_bar.addWidget(self.btn_save_png)
             plot_outer.addLayout(top_bar)
 
-            # ── Sketch toolbar ────────────────────────────────────────────────
+            # ── Sketch toolbar — Row 1: tools ─────────────────────────────────
             _sk_bar = QHBoxLayout()
             _sk_bar.setSpacing(3)
             _sk_bar.setContentsMargins(4, 1, 4, 1)
@@ -932,47 +936,23 @@ class NormalProfileDock(QDockWidget):
                 ('eraser', '✕',      'Eraser — click or drag over annotations to remove'),
                 ('move',   '⇔',      'Move text — click and drag a text annotation to reposition'),
             ]
+            _tool_style = (
+                'QPushButton{font-size:10px;border:1px solid #B0BEC5;'
+                'border-radius:3px;background:#FAFAFA;}'
+                'QPushButton:checked{background:#1565C0;color:white;border-color:#1565C0;}'
+                'QPushButton:hover:!checked{background:#E3F2FD;}'
+            )
             for _mode, _label, _tip in _SKETCH_TOOLS:
                 _sb = QPushButton(_label)
                 _sb.setCheckable(True)
                 _sb.setFixedSize(38, 22)
                 _sb.setToolTip(_tip)
-                _sb.setStyleSheet(
-                    'QPushButton{font-size:10px;border:1px solid #B0BEC5;'
-                    'border-radius:3px;background:#FAFAFA;}'
-                    'QPushButton:checked{background:#1565C0;color:white;border-color:#1565C0;}'
-                    'QPushButton:hover:!checked{background:#E3F2FD;}'
-                )
+                _sb.setStyleSheet(_tool_style)
                 _sb.clicked.connect(
                     lambda chk, m=_mode: self._sketch_activate(m) if chk else self._sketch_deactivate()
                 )
                 _sk_bar.addWidget(_sb)
                 self._sketch_btns[_mode] = _sb
-
-            _sk_bar.addSpacing(6)
-
-            # Preset colour swatches
-            for _hc, _ct in [('#E53935', 'Red'), ('#1565C0', 'Blue'),
-                              ('#2E7D32', 'Green'), ('#000000', 'Black'),
-                              ('#FF8C00', 'Orange')]:
-                _cb = QPushButton()
-                _cb.setFixedSize(18, 18)
-                _cb.setToolTip(_ct)
-                _cb.setStyleSheet(
-                    f'background:{_hc};border:1px solid #888;border-radius:2px;'
-                )
-                _cb.clicked.connect(lambda _, c=_hc: self._sketch_set_color(c))
-                _sk_bar.addWidget(_cb)
-
-            # Custom colour picker swatch
-            self._sketch_color_btn = QPushButton()
-            self._sketch_color_btn.setFixedSize(22, 18)
-            self._sketch_color_btn.setToolTip('Custom colour…')
-            self._sketch_color_btn.setStyleSheet(
-                f'background:{self._sketch_color};border:2px solid #555;border-radius:2px;'
-            )
-            self._sketch_color_btn.clicked.connect(self._sketch_pick_color)
-            _sk_bar.addWidget(self._sketch_color_btn)
 
             _sk_bar.addStretch()
 
@@ -985,8 +965,87 @@ class NormalProfileDock(QDockWidget):
             )
             _btn_clr.clicked.connect(self._sketch_clear)
             _sk_bar.addWidget(_btn_clr)
-
             plot_outer.addLayout(_sk_bar)
+
+            # ── Sketch toolbar — Row 2: style options + colours ────────────────
+            _sk_bar2 = QHBoxLayout()
+            _sk_bar2.setSpacing(3)
+            _sk_bar2.setContentsMargins(4, 0, 4, 2)
+
+            _lbl_style = QLabel('Line:')
+            _lbl_style.setStyleSheet('font-size:10px; color:#546E7A;')
+            _sk_bar2.addWidget(_lbl_style)
+
+            # Line width spinbox
+            self._sketch_lw_spin = QDoubleSpinBox()
+            self._sketch_lw_spin.setRange(0.5, 10.0)
+            self._sketch_lw_spin.setSingleStep(0.5)
+            self._sketch_lw_spin.setValue(self._sketch_lw)
+            self._sketch_lw_spin.setDecimals(1)
+            self._sketch_lw_spin.setFixedWidth(56)
+            self._sketch_lw_spin.setFixedHeight(22)
+            self._sketch_lw_spin.setToolTip('Line thickness (pt)')
+            self._sketch_lw_spin.setStyleSheet('font-size:10px;')
+            self._sketch_lw_spin.valueChanged.connect(
+                lambda v: setattr(self, '_sketch_lw', v)
+            )
+            _sk_bar2.addWidget(self._sketch_lw_spin)
+
+            _sk_bar2.addSpacing(4)
+
+            # Line style combo
+            self._sketch_ls_combo = QComboBox()
+            self._sketch_ls_combo.setFixedWidth(112)
+            self._sketch_ls_combo.setFixedHeight(22)
+            self._sketch_ls_combo.setToolTip('Line style')
+            self._sketch_ls_combo.setStyleSheet('font-size:10px;')
+            for _lsv, _lslbl in [
+                ('-',  '─────  Solid'),
+                ('--', '- - -  Dashed'),
+                (':',  '·····  Dotted'),
+                ('-.', '-·-·-  Dash-dot'),
+            ]:
+                self._sketch_ls_combo.addItem(_lslbl, _lsv)
+            self._sketch_ls_combo.currentIndexChanged.connect(
+                lambda i: setattr(self, '_sketch_ls',
+                                  self._sketch_ls_combo.itemData(i))
+            )
+            _sk_bar2.addWidget(self._sketch_ls_combo)
+
+            _sk_bar2.addSpacing(8)
+
+            # Expanded colour palette (12 presets)
+            _PALETTE = [
+                ('#E53935', 'Red'),       ('#C62828', 'Dark Red'),
+                ('#1565C0', 'Blue'),      ('#0D47A1', 'Dark Blue'),
+                ('#2E7D32', 'Green'),     ('#FF8C00', 'Orange'),
+                ('#6A1B9A', 'Purple'),    ('#00838F', 'Teal'),
+                ('#F57F17', 'Amber'),     ('#37474F', 'Slate'),
+                ('#000000', 'Black'),     ('#FFFFFF', 'White'),
+            ]
+            for _hc, _ct in _PALETTE:
+                _cb = QPushButton()
+                _cb.setFixedSize(16, 16)
+                _cb.setToolTip(_ct)
+                _cb.setStyleSheet(
+                    f'background:{_hc};border:1px solid #888;border-radius:2px;'
+                )
+                _cb.clicked.connect(lambda _, c=_hc: self._sketch_set_color(c))
+                _sk_bar2.addWidget(_cb)
+
+            # Custom colour picker
+            self._sketch_color_btn = QPushButton()
+            self._sketch_color_btn.setFixedSize(22, 16)
+            self._sketch_color_btn.setToolTip('Custom colour…')
+            self._sketch_color_btn.setStyleSheet(
+                f'background:{self._sketch_color};border:2px solid #555;border-radius:2px;'
+            )
+            self._sketch_color_btn.clicked.connect(self._sketch_pick_color)
+            _sk_bar2.addWidget(self._sketch_color_btn)
+
+            _sk_bar2.addStretch()
+            plot_outer.addLayout(_sk_bar2)
+
             plot_outer.addWidget(self.canvas_plot, stretch=1)
         else:
             plot_outer.addWidget(QLabel(
@@ -1646,7 +1705,8 @@ class NormalProfileDock(QDockWidget):
             self._sketch_pen_pts = ([event.xdata], [event.ydata])
             line, = ax.plot(
                 self._sketch_pen_pts[0], self._sketch_pen_pts[1],
-                color=self._sketch_color, linewidth=2,
+                color=self._sketch_color, linewidth=self._sketch_lw,
+                linestyle=self._sketch_ls,
                 solid_capstyle='round', solid_joinstyle='round', zorder=10
             )
             self._sketch_current = (line, ax)
@@ -1655,7 +1715,8 @@ class NormalProfileDock(QDockWidget):
         elif self._sketch_mode == 'line':
             line, = ax.plot(
                 [event.xdata, event.xdata], [event.ydata, event.ydata],
-                color=self._sketch_color, linewidth=2,
+                color=self._sketch_color, linewidth=self._sketch_lw,
+                linestyle=self._sketch_ls,
                 solid_capstyle='round', zorder=10
             )
             self._sketch_current = (line, ax)
@@ -1665,7 +1726,8 @@ class NormalProfileDock(QDockWidget):
             ann = ax.annotate(
                 '', xy=(event.xdata, event.ydata),
                 xytext=(event.xdata, event.ydata),
-                arrowprops=dict(arrowstyle='->', color=self._sketch_color, lw=2),
+                arrowprops=dict(arrowstyle='->', color=self._sketch_color,
+                                lw=self._sketch_lw, linestyle=self._sketch_ls),
                 zorder=10
             )
             self._sketch_current = (ann, ax)
@@ -1674,7 +1736,8 @@ class NormalProfileDock(QDockWidget):
         elif self._sketch_mode == 'rect':
             rect = _MplRect(
                 (event.xdata, event.ydata), 0, 0,
-                linewidth=2, edgecolor=self._sketch_color,
+                linewidth=self._sketch_lw, linestyle=self._sketch_ls,
+                edgecolor=self._sketch_color,
                 facecolor='none', zorder=10
             )
             ax.add_patch(rect)
@@ -1702,7 +1765,8 @@ class NormalProfileDock(QDockWidget):
                 return
             ellipse = _MplEllipse(
                 (event.xdata, event.ydata), 0, 0,
-                linewidth=2, edgecolor=self._sketch_color,
+                linewidth=self._sketch_lw, linestyle=self._sketch_ls,
+                edgecolor=self._sketch_color,
                 facecolor='none', zorder=10
             )
             ax.add_patch(ellipse)
