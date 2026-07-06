@@ -1,6 +1,6 @@
 [general]
 name=Advanced Profile Tool
-qgisMinimumVersion=3.16
+qgisMinimumVersion=3.28
 description=Interactive normal profile tool for raster and vector surfaces along a user-defined alignment
 version=0.5
 author=Dipendra Magaju
@@ -12,6 +12,6 @@ tags=profile,elevation,flood,terrain,hydrology,water,DEM,cross section,raster,ve
 homepage=https://github.com/DMagaju/Advanced-Profile-Tool
 category=Plugins
 icon=icon.svg
-experimental=True
+experimental=False
 deprecated=False
-supportsQt6=True
+supportsQt6=yes
