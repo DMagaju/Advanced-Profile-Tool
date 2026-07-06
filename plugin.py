@@ -391,10 +391,11 @@ class NormalProfileDock(QDockWidget):
         self._sketch_color_btn   = None    # active-color swatch
         self._sketch_drag_target = None    # text artist being moved in 'move' mode
         self._sketch_drag_offset = (0, 0)  # data-space offset at grab point
-        self._sketch_lw          = 2.0     # line width (pt)
-        self._sketch_ls          = '-'     # line style: '-' '--' ':' '-.'
-        self._sketch_lw_spin     = None    # widget ref
-        self._sketch_ls_combo    = None    # widget ref
+        self._sketch_lw             = 2.0     # line width (pt)
+        self._sketch_ls             = '-'     # line style: '-' '--' ':' '-.'
+        self._sketch_lw_spin        = None    # widget ref
+        self._sketch_ls_combo       = None    # widget ref
+        self._sketch_pending_specs  = None    # saved across _rebuild_figure + _refresh_plot
         self._color_idx          = 0
         self._has_xsec_plot      = False
         self._xsec_dd            = None
@@ -1105,6 +1106,7 @@ class NormalProfileDock(QDockWidget):
         cur_wins = 1 + len(self._extra_axes)
         if want_xsec == self._has_xsec_plot and n_wins == cur_wins:
             return
+        self._sketch_pending_specs = self._sketch_serialise()  # save before figure wipe
         self.figure.clear()
         self._cursor_lines   = []
         self._cc_hlines      = []
@@ -1679,6 +1681,114 @@ class NormalProfileDock(QDockWidget):
         self._sketch_pressed  = False
         if MATPLOTLIB_AVAILABLE:
             self.canvas_plot.draw_idle()
+
+    def _sketch_serialise(self):
+        """Return a list of plain-dict specs that can recreate all current sketch objects."""
+        if not MATPLOTLIB_AVAILABLE or not self._sketch_objects:
+            return []
+        specs = []
+        for obj in self._sketch_objects:
+            try:
+                if isinstance(obj, _MplRect):
+                    specs.append({
+                        't': 'rect',
+                        'xy': tuple(obj.get_xy()),
+                        'w': obj.get_width(),
+                        'h': obj.get_height(),
+                        'ec': obj.get_edgecolor(),
+                        'lw': obj.get_linewidth(),
+                        'ls': obj.get_linestyle(),
+                    })
+                elif isinstance(obj, _MplEllipse):
+                    specs.append({
+                        't': 'ellipse',
+                        'center': tuple(obj.center),
+                        'w': obj.width,
+                        'h': obj.height,
+                        'ec': obj.get_edgecolor(),
+                        'lw': obj.get_linewidth(),
+                        'ls': obj.get_linestyle(),
+                    })
+                elif hasattr(obj, 'arrow_patch') and obj.arrow_patch is not None:
+                    ap = obj.arrow_patch
+                    specs.append({
+                        't': 'arrow',
+                        'head': (float(obj.xy[0]), float(obj.xy[1])),
+                        'tail': (float(obj.get_position()[0]), float(obj.get_position()[1])),
+                        'ec': ap.get_edgecolor(),
+                        'lw': ap.get_linewidth(),
+                        'ls': ap.get_linestyle(),
+                    })
+                elif hasattr(obj, 'get_text'):
+                    specs.append({
+                        't': 'text',
+                        'x': float(obj.get_position()[0]),
+                        'y': float(obj.get_position()[1]),
+                        'text': obj.get_text(),
+                        'color': obj.get_color(),
+                    })
+                elif hasattr(obj, 'get_xdata'):
+                    specs.append({
+                        't': 'line2d',
+                        'x': list(obj.get_xdata()),
+                        'y': list(obj.get_ydata()),
+                        'color': obj.get_color(),
+                        'lw': obj.get_linewidth(),
+                        'ls': obj.get_linestyle(),
+                        'cap': obj.get_solid_capstyle(),
+                        'join': obj.get_solid_joinstyle(),
+                    })
+            except Exception:
+                pass
+        return specs
+
+    def _sketch_restore(self, specs):
+        """Re-create sketch artists from serialised specs onto the current axes."""
+        if not specs or not MATPLOTLIB_AVAILABLE:
+            return
+        ax = self.ax
+        for s in specs:
+            try:
+                t = s['t']
+                if t == 'rect':
+                    p = _MplRect(s['xy'], s['w'], s['h'],
+                                 linewidth=s['lw'], linestyle=s['ls'],
+                                 edgecolor=s['ec'], facecolor='none', zorder=10)
+                    ax.add_patch(p)
+                    self._sketch_objects.append(p)
+                elif t == 'ellipse':
+                    p = _MplEllipse(s['center'], s['w'], s['h'],
+                                    linewidth=s['lw'], linestyle=s['ls'],
+                                    edgecolor=s['ec'], facecolor='none', zorder=10)
+                    ax.add_patch(p)
+                    self._sketch_objects.append(p)
+                elif t == 'arrow':
+                    ann = ax.annotate(
+                        '', xy=s['head'], xytext=s['tail'],
+                        arrowprops=dict(arrowstyle='->', color=s['ec'],
+                                        lw=s['lw'], linestyle=s['ls']),
+                        zorder=10,
+                    )
+                    self._sketch_objects.append(ann)
+                elif t == 'text':
+                    ann = ax.text(
+                        s['x'], s['y'], s['text'],
+                        color=s['color'], fontsize=9, fontweight='bold', zorder=10,
+                        bbox=dict(boxstyle='round,pad=0.25', facecolor='white',
+                                  edgecolor=s['color'], alpha=0.85),
+                    )
+                    self._sketch_objects.append(ann)
+                elif t == 'line2d':
+                    line, = ax.plot(
+                        s['x'], s['y'],
+                        color=s['color'], linewidth=s['lw'], linestyle=s['ls'],
+                        solid_capstyle=s.get('cap', 'round'),
+                        solid_joinstyle=s.get('join', 'round'),
+                        zorder=10,
+                    )
+                    self._sketch_objects.append(line)
+            except Exception:
+                pass
 
     def _sketch_erase_at(self, event):
         """Remove the topmost sketch object under the cursor."""
@@ -2572,6 +2682,11 @@ class NormalProfileDock(QDockWidget):
     # ------------------------------------------------------------------ plot
 
     def _plot(self, chainages, profile_data, col_meta):
+        if self._sketch_pending_specs is not None:
+            _sketch_save = self._sketch_pending_specs
+            self._sketch_pending_specs = None
+        else:
+            _sketch_save = self._sketch_serialise()
         self._reset_axes()
         xs   = np.array(chainages, dtype=float)
         keys = list(profile_data.keys())
@@ -2788,6 +2903,7 @@ class NormalProfileDock(QDockWidget):
         self._update_win_col_combos(keys)
 
         self._do_tight_layout()
+        self._sketch_restore(_sketch_save)
         self.canvas_plot.draw()
 
 
