@@ -29,6 +29,7 @@ from qgis.PyQt.QtWidgets import (
     QFileDialog, QGroupBox, QFrame, QSizePolicy, QMessageBox,
     QApplication, QCheckBox, QComboBox, QColorDialog, QScrollArea,
     QListWidget, QListWidgetItem, QTabWidget, QInputDialog, QProgressBar,
+    QSpinBox,
 )
 from qgis.PyQt.QtGui import QColor, QIcon, QPixmap, QPainter, QPen, QStandardItem, QStandardItemModel
 
@@ -167,6 +168,15 @@ def _thin_sep():
     line.setFrameShape(_HLINE)
     line.setStyleSheet('color:#E0E0E0;')
     return line
+
+
+def _to_hex_color(c) -> str:
+    """Convert any matplotlib color spec (including RGBA tuple) to '#rrggbb'."""
+    try:
+        import matplotlib.colors as _mc
+        return _mc.to_hex(c)
+    except Exception:
+        return '#000000'
 
 
 def _color_btn(hex_color: str, tooltip: str = 'Change colour') -> QPushButton:
@@ -389,8 +399,7 @@ class NormalProfileDock(QDockWidget):
         self._sketch_pressed    = False
         self._sketch_btns        = {}      # {mode: QPushButton}
         self._sketch_color_btn   = None    # active-color swatch
-        self._sketch_drag_target = None    # text artist being moved in 'move' mode
-        self._sketch_drag_offset = (0, 0)  # data-space offset at grab point
+        self._sketch_drag_info   = None    # {obj, type, ...} set by 'move' press handler
         self._sketch_lw             = 2.0     # line width (pt)
         self._sketch_ls             = '-'     # line style: '-' '--' ':' '-.'
         self._sketch_lw_spin        = None    # widget ref
@@ -935,7 +944,8 @@ class NormalProfileDock(QDockWidget):
                 ('rect',   'Rect',   'Rectangle — click and drag'),
                 ('circle', '○',      'Circle / Ellipse — drag from centre; hold Shift for perfect circle'),
                 ('eraser', '✕',      'Eraser — click or drag over annotations to remove'),
-                ('move',   '⇔',      'Move text — click and drag a text annotation to reposition'),
+                ('move',   '⇔',      'Move — click and drag any annotation to reposition'),
+                ('edit',   '✎',      'Edit — click an annotation to change its colour, thickness or text style'),
             ]
             _tool_style = (
                 'QPushButton{font-size:10px;border:1px solid #B0BEC5;'
@@ -1381,11 +1391,11 @@ class NormalProfileDock(QDockWidget):
             self._pan_press_px = self._pan_xlim0 = \
                 self._pan_ylim0 = self._pan_transform = None
         if event.button == 1 and self._sketch_pressed:
-            self._sketch_pressed     = False
-            self._sketch_current     = None
-            self._sketch_press_data  = None
-            self._sketch_pen_pts     = ([], [])
-            self._sketch_drag_target = None
+            self._sketch_pressed    = False
+            self._sketch_current    = None
+            self._sketch_press_data = None
+            self._sketch_pen_pts    = ([], [])
+            self._sketch_drag_info  = None
             self.canvas_plot.draw_idle()
 
     def _on_scroll_zoom(self, event):
@@ -1643,11 +1653,17 @@ class NormalProfileDock(QDockWidget):
         self._sketch_mode = mode
         try:
             _cs = Qt.CursorShape
-            _cur = {'move': _cs.SizeAllCursor, 'eraser': _cs.ForbiddenCursor
-                    }.get(mode, _cs.CrossCursor)
+            _cur = {
+                'move':   _cs.SizeAllCursor,
+                'eraser': _cs.ForbiddenCursor,
+                'edit':   _cs.PointingHandCursor,
+            }.get(mode, _cs.CrossCursor)
         except AttributeError:
-            _cur = {'move': Qt.SizeAllCursor, 'eraser': Qt.ForbiddenCursor  # type: ignore
-                    }.get(mode, Qt.CrossCursor)  # type: ignore
+            _cur = {
+                'move':   Qt.SizeAllCursor,    # type: ignore
+                'eraser': Qt.ForbiddenCursor,  # type: ignore
+                'edit':   Qt.PointingHandCursor,  # type: ignore
+            }.get(mode, Qt.CrossCursor)  # type: ignore
         self.canvas_plot.setCursor(_cur)
 
     def _sketch_deactivate(self):
@@ -1725,7 +1741,11 @@ class NormalProfileDock(QDockWidget):
                         'x': float(obj.get_position()[0]),
                         'y': float(obj.get_position()[1]),
                         'text': obj.get_text(),
-                        'color': obj.get_color(),
+                        'color': _to_hex_color(obj.get_color()),
+                        'fontsize': float(obj.get_fontsize()),
+                        'fontweight': obj.get_fontweight(),
+                        'fontstyle': obj.get_fontstyle(),
+                        'fontfamily': (obj.get_fontfamily() or ['sans-serif'])[0],
                     })
                 elif hasattr(obj, 'get_xdata'):
                     specs.append({
@@ -1773,7 +1793,12 @@ class NormalProfileDock(QDockWidget):
                 elif t == 'text':
                     ann = ax.text(
                         s['x'], s['y'], s['text'],
-                        color=s['color'], fontsize=9, fontweight='bold', zorder=10,
+                        color=s['color'],
+                        fontsize=s.get('fontsize', 9),
+                        fontweight=s.get('fontweight', 'bold'),
+                        fontstyle=s.get('fontstyle', 'normal'),
+                        fontfamily=s.get('fontfamily', 'sans-serif'),
+                        zorder=10,
                         bbox=dict(boxstyle='round,pad=0.25', facecolor='white',
                                   edgecolor=s['color'], alpha=0.85),
                     )
@@ -1805,6 +1830,188 @@ class NormalProfileDock(QDockWidget):
                 self._sketch_objects.remove(obj)
                 self.canvas_plot.draw_idle()
                 break
+
+    def _sketch_edit_object(self, obj):
+        """Open a property-editor dialog for a sketch object and apply changes."""
+        is_text  = (hasattr(obj, 'get_text') and bool(obj.get_text())
+                    and not (hasattr(obj, 'arrow_patch') and obj.arrow_patch is not None))
+        is_arrow = hasattr(obj, 'arrow_patch') and obj.arrow_patch is not None
+        is_line  = hasattr(obj, 'get_xdata')
+        is_patch = isinstance(obj, (_MplRect, _MplEllipse))
+
+        # --- read current colour ------------------------------------------
+        if is_text:
+            cur_color = _to_hex_color(obj.get_color())
+        elif is_arrow:
+            cur_color = _to_hex_color(obj.arrow_patch.get_edgecolor())
+        elif is_line:
+            cur_color = _to_hex_color(obj.get_color())
+        elif is_patch:
+            cur_color = _to_hex_color(obj.get_edgecolor())
+        else:
+            cur_color = '#000000'
+
+        # --- read current lw / ls -----------------------------------------
+        def _cur_lw():
+            if is_arrow: return obj.arrow_patch.get_linewidth()
+            if is_line:  return obj.get_linewidth()
+            if is_patch: return obj.get_linewidth()
+            return 2.0
+
+        def _cur_ls():
+            _norm = {'solid': '-', 'dashed': '--', 'dotted': ':', 'dashdot': '-.'}
+            if is_arrow: raw = obj.arrow_patch.get_linestyle()
+            elif is_line:  raw = obj.get_linestyle()
+            elif is_patch: raw = obj.get_linestyle()
+            else: return '-'
+            return _norm.get(raw, raw)
+
+        # === build dialog ==================================================
+        dlg = QDialog(self.canvas_plot)
+        dlg.setWindowTitle('Edit Annotation')
+        dlg.setMinimumWidth(260)
+        root = QVBoxLayout(dlg)
+        root.setSpacing(8)
+        root.setContentsMargins(12, 12, 12, 12)
+
+        _lbl_style = 'font-size:10px; color:#546E7A;'
+
+        # ── Colour ────────────────────────────────────────────────────────
+        color_val = [cur_color]
+        cr = QHBoxLayout()
+        _clbl = QLabel('Colour:'); _clbl.setStyleSheet(_lbl_style)
+        cr.addWidget(_clbl)
+        color_swatch = QPushButton()
+        color_swatch.setFixedSize(50, 22)
+        color_swatch.setStyleSheet(
+            f'background:{cur_color};border:1px solid #888;border-radius:3px;'
+        )
+        def _pick():
+            c = QColorDialog.getColor(QColor(color_val[0]), dlg)
+            if c.isValid():
+                color_val[0] = c.name()
+                color_swatch.setStyleSheet(
+                    f'background:{c.name()};border:1px solid #888;border-radius:3px;'
+                )
+        color_swatch.clicked.connect(_pick)
+        cr.addWidget(color_swatch); cr.addStretch()
+        root.addLayout(cr)
+
+        # ── Line width + style (non-text objects) ──────────────────────────
+        lw_spin  = None
+        ls_combo = None
+        if not is_text:
+            lwr = QHBoxLayout()
+            _wlbl = QLabel('Width:'); _wlbl.setStyleSheet(_lbl_style)
+            lwr.addWidget(_wlbl)
+            lw_spin = QDoubleSpinBox()
+            lw_spin.setRange(0.5, 10.0); lw_spin.setSingleStep(0.5)
+            lw_spin.setDecimals(1); lw_spin.setFixedWidth(65)
+            lw_spin.setValue(_cur_lw())
+            lwr.addWidget(lw_spin); lwr.addStretch()
+            root.addLayout(lwr)
+
+            lsr = QHBoxLayout()
+            _slbl = QLabel('Style:'); _slbl.setStyleSheet(_lbl_style)
+            lsr.addWidget(_slbl)
+            ls_combo = QComboBox(); ls_combo.setFixedWidth(130)
+            for _v, _n in [('-',  '─── Solid'), ('--', '-- Dashed'),
+                           (':',  '··· Dotted'), ('-.', '-·- Dash-dot')]:
+                ls_combo.addItem(_n, _v)
+            _cur = _cur_ls()
+            for _i in range(ls_combo.count()):
+                if ls_combo.itemData(_i) == _cur:
+                    ls_combo.setCurrentIndex(_i); break
+            lsr.addWidget(ls_combo); lsr.addStretch()
+            root.addLayout(lsr)
+
+        # ── Text style (text objects only) ─────────────────────────────────
+        font_combo = size_spin = bold_cb = italic_cb = None
+        if is_text:
+            # Font family
+            fr = QHBoxLayout()
+            _flbl = QLabel('Font:'); _flbl.setStyleSheet(_lbl_style)
+            fr.addWidget(_flbl)
+            font_combo = QComboBox(); font_combo.setFixedWidth(140)
+            for _fn in ['sans-serif', 'serif', 'monospace',
+                        'DejaVu Sans', 'Arial', 'Courier New']:
+                font_combo.addItem(_fn)
+            try:
+                _ff = (obj.get_fontfamily() or ['sans-serif'])[0]
+                _fi = font_combo.findText(_ff)
+                if _fi >= 0: font_combo.setCurrentIndex(_fi)
+            except Exception:
+                pass
+            fr.addWidget(font_combo); fr.addStretch()
+            root.addLayout(fr)
+
+            # Size
+            sr = QHBoxLayout()
+            _szlbl = QLabel('Size:'); _szlbl.setStyleSheet(_lbl_style)
+            sr.addWidget(_szlbl)
+            size_spin = QSpinBox()
+            size_spin.setRange(6, 72); size_spin.setFixedWidth(60)
+            size_spin.setValue(int(obj.get_fontsize()))
+            sr.addWidget(size_spin); sr.addStretch()
+            root.addLayout(sr)
+
+            # Bold + Italic
+            bir = QHBoxLayout()
+            bold_cb   = QCheckBox('Bold')
+            italic_cb = QCheckBox('Italic')
+            bold_cb.setChecked(str(obj.get_fontweight()) in ('bold', '700', '800', '900'))
+            italic_cb.setChecked(obj.get_fontstyle() == 'italic')
+            bir.addWidget(bold_cb); bir.addWidget(italic_cb); bir.addStretch()
+            root.addLayout(bir)
+
+        # ── OK / Cancel ───────────────────────────────────────────────────
+        sep = QFrame(); sep.setFrameShape(_HLINE); sep.setFrameShadow(_SUNKEN)
+        root.addWidget(sep)
+        btn_row = QHBoxLayout()
+        btn_ok     = QPushButton('OK');     btn_ok.setFixedWidth(70)
+        btn_cancel = QPushButton('Cancel'); btn_cancel.setFixedWidth(70)
+        btn_row.addStretch(); btn_row.addWidget(btn_ok); btn_row.addWidget(btn_cancel)
+        root.addLayout(btn_row)
+        btn_cancel.clicked.connect(dlg.reject)
+
+        def _apply():
+            nc = color_val[0]
+            # Apply colour
+            if is_text:
+                obj.set_color(nc)
+                bp = obj.get_bbox_patch()
+                if bp: bp.set_edgecolor(nc)
+            elif is_arrow:
+                obj.arrow_patch.set_edgecolor(nc)
+                obj.arrow_patch.set_facecolor(nc)
+            elif is_line:
+                obj.set_color(nc)
+            elif is_patch:
+                obj.set_edgecolor(nc)
+            # Apply width / style
+            if lw_spin is not None:
+                nlw = lw_spin.value()
+                if is_arrow: obj.arrow_patch.set_linewidth(nlw)
+                elif is_line: obj.set_linewidth(nlw)
+                elif is_patch: obj.set_linewidth(nlw)
+            if ls_combo is not None:
+                nls = ls_combo.currentData()
+                if is_arrow: obj.arrow_patch.set_linestyle(nls)
+                elif is_line: obj.set_linestyle(nls)
+                elif is_patch: obj.set_linestyle(nls)
+            # Apply text style
+            if is_text:
+                if font_combo: obj.set_fontfamily(font_combo.currentText())
+                if size_spin:  obj.set_fontsize(size_spin.value())
+                if bold_cb:    obj.set_fontweight('bold' if bold_cb.isChecked() else 'normal')
+                if italic_cb:  obj.set_fontstyle('italic' if italic_cb.isChecked() else 'normal')
+                bp = obj.get_bbox_patch()
+                if bp: bp.set_edgecolor(nc)
+            self.canvas_plot.draw_idle()
+            dlg.accept()
+
+        btn_ok.clicked.connect(_apply)
+        dlg.exec()
 
     def _sketch_on_press(self, event):
         self._sketch_pressed    = True
@@ -1889,29 +2096,69 @@ class NormalProfileDock(QDockWidget):
             return
 
         elif self._sketch_mode == 'move':
-            self._sketch_drag_target = None
+            self._sketch_drag_info = None
             for obj in reversed(self._sketch_objects):
-                # Only text objects with visible content are movable (not arrow annotations)
-                if not (hasattr(obj, 'get_position') and hasattr(obj, 'set_position')
-                        and hasattr(obj, 'get_text') and obj.get_text()):
+                try:
+                    hit, _ = obj.contains(event)
+                except Exception:
+                    hit = False
+                if not hit:
                     continue
+                # Build drag info depending on object type
+                if isinstance(obj, _MplEllipse):
+                    cx, cy = obj.center
+                    self._sketch_drag_info = {
+                        'obj': obj, 'type': 'ellipse',
+                        'ox': cx - event.xdata, 'oy': cy - event.ydata,
+                    }
+                elif isinstance(obj, _MplRect):
+                    bx, by = obj.get_xy()
+                    self._sketch_drag_info = {
+                        'obj': obj, 'type': 'rect',
+                        'ox': bx - event.xdata, 'oy': by - event.ydata,
+                    }
+                elif hasattr(obj, 'arrow_patch') and obj.arrow_patch is not None:
+                    hx, hy = float(obj.xy[0]), float(obj.xy[1])
+                    tx, ty = obj.get_position()
+                    self._sketch_drag_info = {
+                        'obj': obj, 'type': 'arrow',
+                        'hox': hx - event.xdata, 'hoy': hy - event.ydata,
+                        'tox': tx - event.xdata, 'toy': ty - event.ydata,
+                    }
+                elif hasattr(obj, 'get_text') and obj.get_text():
+                    px, py = obj.get_position()
+                    self._sketch_drag_info = {
+                        'obj': obj, 'type': 'text',
+                        'ox': px - event.xdata, 'oy': py - event.ydata,
+                    }
+                elif hasattr(obj, 'get_xdata'):
+                    self._sketch_drag_info = {
+                        'obj': obj, 'type': 'line2d',
+                        'x0': list(obj.get_xdata()),
+                        'y0': list(obj.get_ydata()),
+                        'px': event.xdata, 'py': event.ydata,
+                    }
+                if self._sketch_drag_info:
+                    break
+            self._sketch_pressed = self._sketch_drag_info is not None
+            return
+
+        elif self._sketch_mode == 'edit':
+            self._sketch_pressed = False
+            for obj in reversed(self._sketch_objects):
                 try:
                     hit, _ = obj.contains(event)
                 except Exception:
                     hit = False
                 if hit:
-                    pos = obj.get_position()
-                    self._sketch_drag_target = obj
-                    self._sketch_drag_offset = (pos[0] - event.xdata,
-                                                pos[1] - event.ydata)
+                    self._sketch_edit_object(obj)
                     break
-            self._sketch_pressed = self._sketch_drag_target is not None
             return
 
         self.canvas_plot.draw_idle()
 
     def _sketch_on_motion(self, event):
-        _no_current_ok = self._sketch_mode in ('eraser', 'move')
+        _no_current_ok = self._sketch_mode in ('eraser', 'move', 'edit')
         if not self._sketch_current and not _no_current_ok:
             return
         x, y = event.xdata, event.ydata
@@ -1951,9 +2198,23 @@ class NormalProfileDock(QDockWidget):
             return
 
         elif self._sketch_mode == 'move':
-            if self._sketch_drag_target is not None:
-                ox, oy = self._sketch_drag_offset
-                self._sketch_drag_target.set_position((x + ox, y + oy))
+            d = self._sketch_drag_info
+            if d is None:
+                return
+            obj = d['obj']
+            if d['type'] == 'ellipse':
+                obj.set_center((x + d['ox'], y + d['oy']))
+            elif d['type'] == 'rect':
+                obj.set_xy((x + d['ox'], y + d['oy']))
+            elif d['type'] == 'arrow':
+                obj.xy = (x + d['hox'], y + d['hoy'])
+                obj.set_position((x + d['tox'], y + d['toy']))
+            elif d['type'] == 'text':
+                obj.set_position((x + d['ox'], y + d['oy']))
+            elif d['type'] == 'line2d':
+                dx = x - d['px'];  dy = y - d['py']
+                obj.set_data([v + dx for v in d['x0']],
+                             [v + dy for v in d['y0']])
 
         self.canvas_plot.draw_idle()
 
