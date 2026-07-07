@@ -22,7 +22,7 @@ import os
 from collections import defaultdict
 from datetime import datetime
 
-from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtCore import Qt, pyqtSignal, QTimer
 from qgis.PyQt.QtWidgets import (
     QAction, QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QDoubleSpinBox, QPushButton, QLineEdit,
@@ -1833,6 +1833,12 @@ class NormalProfileDock(QDockWidget):
 
     def _sketch_edit_object(self, obj):
         """Open a property-editor dialog for a sketch object and apply changes."""
+        try:
+            self._sketch_edit_object_impl(obj)
+        except Exception as exc:
+            QMessageBox.critical(self, 'Sketch Edit Error', str(exc))
+
+    def _sketch_edit_object_impl(self, obj):
         is_text  = (hasattr(obj, 'get_text') and bool(obj.get_text())
                     and not (hasattr(obj, 'arrow_patch') and obj.arrow_patch is not None))
         is_arrow = hasattr(obj, 'arrow_patch') and obj.arrow_patch is not None
@@ -1867,9 +1873,13 @@ class NormalProfileDock(QDockWidget):
             return _norm.get(raw, raw)
 
         # === build dialog ==================================================
-        dlg = QDialog(self.canvas_plot)
+        dlg = QDialog(self)
         dlg.setWindowTitle('Edit Annotation')
         dlg.setMinimumWidth(260)
+        try:
+            dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+        except AttributeError:
+            dlg.setWindowFlag(Qt.WindowStaysOnTopHint)  # type: ignore
         root = QVBoxLayout(dlg)
         root.setSpacing(8)
         root.setContentsMargins(12, 12, 12, 12)
@@ -2011,6 +2021,8 @@ class NormalProfileDock(QDockWidget):
             dlg.accept()
 
         btn_ok.clicked.connect(_apply)
+        dlg.raise_()
+        dlg.activateWindow()
         dlg.exec()
 
     def _sketch_on_press(self, event):
@@ -2145,14 +2157,28 @@ class NormalProfileDock(QDockWidget):
 
         elif self._sketch_mode == 'edit':
             self._sketch_pressed = False
+            _hit_obj = None
             for obj in reversed(self._sketch_objects):
+                hit = False
                 try:
                     hit, _ = obj.contains(event)
                 except Exception:
-                    hit = False
+                    pass
+                if not hit:
+                    # Fallback: display-coord bbox check (reliable for Text)
+                    try:
+                        renderer = self.figure.canvas.renderer
+                        if hasattr(obj, 'get_window_extent'):
+                            bb = obj.get_window_extent(renderer)
+                            hit = bb.contains(event.x, event.y)
+                    except Exception:
+                        pass
                 if hit:
-                    self._sketch_edit_object(obj)
+                    _hit_obj = obj
                     break
+            if _hit_obj is not None:
+                # Defer past matplotlib's callback so Qt can handle the dialog normally
+                QTimer.singleShot(0, lambda o=_hit_obj: self._sketch_edit_object(o))
             return
 
         self.canvas_plot.draw_idle()
