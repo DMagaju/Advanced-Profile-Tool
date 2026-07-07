@@ -29,7 +29,7 @@ from qgis.PyQt.QtWidgets import (
     QFileDialog, QGroupBox, QFrame, QSizePolicy, QMessageBox,
     QApplication, QCheckBox, QComboBox, QColorDialog, QScrollArea,
     QListWidget, QListWidgetItem, QTabWidget, QInputDialog, QProgressBar,
-    QSpinBox,
+    QSpinBox, QDialog,
 )
 from qgis.PyQt.QtGui import QColor, QIcon, QPixmap, QPainter, QPen, QStandardItem, QStandardItemModel
 
