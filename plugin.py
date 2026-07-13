@@ -23,7 +23,7 @@ import os
 from collections import defaultdict
 from datetime import datetime
 
-from qgis.PyQt.QtCore import Qt, pyqtSignal, QTimer, QSizeF, QPointF
+from qgis.PyQt.QtCore import Qt, pyqtSignal, QTimer, QSizeF, QPointF, QObject, QEvent
 from qgis.PyQt.QtWidgets import (
     QAction, QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QDoubleSpinBox, QPushButton, QLineEdit,
@@ -111,6 +111,19 @@ except AttributeError:
                        Qt.ItemIsUserCheckable |
                        Qt.ItemIsSelectable)
     _USER_ROLE      = Qt.UserRole        # type: ignore[attr-defined]
+
+try:
+    _STRONG_FOCUS     = Qt.FocusPolicy.StrongFocus           # Qt6
+    _KEY_PRESS_TYPE   = QEvent.Type.KeyPress                 # Qt6
+    _KEY_RELEASE_TYPE = QEvent.Type.KeyRelease               # Qt6
+    _KEY_CTRL         = Qt.Key.Key_Control                   # Qt6
+    _CTRL_MOD         = Qt.KeyboardModifier.ControlModifier  # Qt6
+except AttributeError:
+    _STRONG_FOCUS     = Qt.StrongFocus        # type: ignore[attr-defined]  # Qt5
+    _KEY_PRESS_TYPE   = QEvent.KeyPress       # type: ignore[attr-defined]  # Qt5
+    _KEY_RELEASE_TYPE = QEvent.KeyRelease     # type: ignore[attr-defined]  # Qt5
+    _KEY_CTRL         = Qt.Key_Control        # type: ignore[attr-defined]  # Qt5
+    _CTRL_MOD         = Qt.ControlModifier    # type: ignore[attr-defined]  # Qt5
 
 # ---------------------------------------------------------------------------
 # Matplotlib
@@ -383,6 +396,25 @@ def _xsec_type_pix(size: int = 14) -> QPixmap:
 
 
 # ---------------------------------------------------------------------------
+# Global Ctrl-key tracker (application-level event filter)
+# ---------------------------------------------------------------------------
+
+class _CtrlKeyTracker(QObject):
+    """Tracks whether Ctrl is currently held via canvas-level key events."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.ctrl_held = False
+
+    def eventFilter(self, obj, event):
+        t = event.type()
+        if t == _KEY_PRESS_TYPE and event.key() == _KEY_CTRL:
+            self.ctrl_held = True
+        elif t == _KEY_RELEASE_TYPE and event.key() == _KEY_CTRL:
+            self.ctrl_held = False
+        return False  # never consume events
+
+
+# ---------------------------------------------------------------------------
 # Multi-select checkable combo (used in Profile Windows "Data" selector)
 # ---------------------------------------------------------------------------
 
@@ -531,6 +563,10 @@ class NormalProfileDock(QDockWidget):
         self._sketch_current    = None    # in-progress artist tuple (varies by mode)
         self._sketch_pen_pts    = ([], [])
         self._sketch_pressed    = False
+        self._pen_poly_mode     = False   # True while Ctrl+pen polyline is active
+        self._pen_poly_pts      = ([], []) # committed anchor points
+        self._pen_poly_art      = None    # the polyline artist
+        self._ctrl_tracker      = _CtrlKeyTracker(self)  # installed on canvas after canvas is built
         self._level_snap_art    = None    # temporary snap-indicator for level tool
         self._sketch_btns        = {}      # {mode: QPushButton}
         self._sketch_color_btn   = None    # active-color swatch
@@ -1038,6 +1074,8 @@ class NormalProfileDock(QDockWidget):
             self.canvas_plot = FigureCanvas(self.figure)
             self.canvas_plot.setMinimumHeight(240)
             self.canvas_plot.setSizePolicy(_EXPAND, _EXPAND)
+            self.canvas_plot.setFocusPolicy(_STRONG_FOCUS)
+            self.canvas_plot.installEventFilter(self._ctrl_tracker)
             self.canvas_plot.mpl_connect('scroll_event',         self._on_scroll_zoom)
             self.canvas_plot.mpl_connect('resize_event',         self._on_chart_resize)
             self.canvas_plot.mpl_connect('button_press_event',   self._on_mouse_press)
@@ -1581,6 +1619,16 @@ class NormalProfileDock(QDockWidget):
         if not MATPLOTLIB_AVAILABLE:
             return
 
+        # Ctrl+pen polyline: live rubber band without holding mouse button
+        if (self._pen_poly_mode and self._pen_poly_art is not None
+                and event.inaxes is not None
+                and event.xdata is not None and event.ydata is not None):
+            xs = list(self._pen_poly_pts[0]) + [event.xdata]
+            ys = list(self._pen_poly_pts[1]) + [event.ydata]
+            self._pen_poly_art.set_data(xs, ys)
+            self.canvas_plot.draw_idle()
+            return
+
         # Sketch tool motion (suppress hover cursor while drawing)
         if (self._sketch_pressed and self._sketch_mode is not None
                 and event.x is not None and event.y is not None):
@@ -1871,6 +1919,11 @@ class NormalProfileDock(QDockWidget):
         self._sketch_mode    = None
         self._sketch_pressed = False
         self._sketch_current = None
+        # Clear Ctrl+pen polyline state if active
+        if self._pen_poly_mode:
+            self._pen_poly_mode = False
+            self._pen_poly_pts  = ([], [])
+            self._pen_poly_art  = None
         if self._level_snap_art is not None:
             try:
                 self._level_snap_art.remove()
@@ -2476,15 +2529,53 @@ class NormalProfileDock(QDockWidget):
         self._sketch_press_data = (fx, fy)
 
         if self._sketch_mode == 'pen':
-            self._sketch_pen_pts = ([fx], [fy])
-            line, = ax.plot(
-                self._sketch_pen_pts[0], self._sketch_pen_pts[1],
-                color=self._sketch_color, linewidth=self._sketch_lw,
-                linestyle=self._sketch_ls,
-                solid_capstyle='round', solid_joinstyle='round', zorder=10
-            )
-            self._sketch_current = (line, ax)
-            self._sketch_objects.append(line)
+            ctrl = self._ctrl_tracker.ctrl_held
+            if not ctrl:
+                try:
+                    ctrl = bool(QApplication.queryKeyboardModifiers() & _CTRL_MOD)
+                except Exception:
+                    ctrl = False
+
+            if ctrl:
+                self._sketch_pressed = False
+                if not self._pen_poly_mode:
+                    self._pen_poly_mode = True
+                    self._pen_poly_pts  = ([fx], [fy])
+                    line, = ax.plot(
+                        [fx, fx], [fy, fy],
+                        color=self._sketch_color, linewidth=self._sketch_lw,
+                        linestyle=self._sketch_ls,
+                        solid_capstyle='round', solid_joinstyle='round', zorder=10
+                    )
+                    self._pen_poly_art = line
+                    self._sketch_objects.append(line)
+                else:
+                    self._pen_poly_pts[0].append(fx)
+                    self._pen_poly_pts[1].append(fy)
+                    self._pen_poly_art.set_data(*self._pen_poly_pts)
+                self.canvas_plot.draw_idle()
+                return
+            else:
+                if self._pen_poly_mode:
+                    self._pen_poly_pts[0].append(fx)
+                    self._pen_poly_pts[1].append(fy)
+                    self._pen_poly_art.set_data(*self._pen_poly_pts)
+                    self._pen_poly_mode = False
+                    self._pen_poly_pts  = ([], [])
+                    self._pen_poly_art  = None
+                    self._sketch_pressed = False
+                    self.canvas_plot.draw_idle()
+                    return
+                # Normal freehand pen
+                self._sketch_pen_pts = ([fx], [fy])
+                line, = ax.plot(
+                    self._sketch_pen_pts[0], self._sketch_pen_pts[1],
+                    color=self._sketch_color, linewidth=self._sketch_lw,
+                    linestyle=self._sketch_ls,
+                    solid_capstyle='round', solid_joinstyle='round', zorder=10
+                )
+                self._sketch_current = (line, ax)
+                self._sketch_objects.append(line)
 
         elif self._sketch_mode == 'line':
             line, = ax.plot(
@@ -3719,6 +3810,9 @@ class XSectionDialog(QDialog):
         self._xs_sketch_current    = None
         self._xs_sketch_pen_pts    = None
         self._xs_sketch_drag_info  = None
+        self._xs_pen_poly_mode     = False
+        self._xs_pen_poly_pts      = ([], [])
+        self._xs_pen_poly_art      = None
         self._xs_sketch_btns       = {}
         # Cached data for hover interpolation
         self._xs_dist         = []
@@ -3881,6 +3975,8 @@ class XSectionDialog(QDialog):
             self.figure    = Figure(figsize=(7, 4))
             self.ax        = self.figure.add_subplot(111)
             self.canvas_xs = FigureCanvas(self.figure)
+            self.canvas_xs.setFocusPolicy(_STRONG_FOCUS)
+            self.canvas_xs.installEventFilter(self.parent_dock._ctrl_tracker)
             self.canvas_xs.mpl_connect('motion_notify_event', self._on_hover)
             self.canvas_xs.mpl_connect('axes_leave_event',    self._on_leave)
             self.canvas_xs.mpl_connect('button_press_event',   self._xs_sketch_on_press)
@@ -4285,6 +4381,10 @@ class XSectionDialog(QDialog):
         self._xs_sketch_mode = None
         self._xs_sketch_pressed = False
         self._xs_sketch_current = None
+        if self._xs_pen_poly_mode:
+            self._xs_pen_poly_mode = False
+            self._xs_pen_poly_pts  = ([], [])
+            self._xs_pen_poly_art  = None
         if self._xs_level_snap_art is not None:
             try:
                 self._xs_level_snap_art.remove()
@@ -4325,13 +4425,51 @@ class XSectionDialog(QDialog):
         ax = self.ax
 
         if self._xs_sketch_mode == 'pen':
-            self._xs_sketch_pen_pts = ([fx], [fy])
-            line, = ax.plot([fx], [fy],
-                            color=self._xs_sketch_color, linewidth=self._xs_sketch_lw,
-                            linestyle=self._xs_sketch_ls,
-                            solid_capstyle='round', solid_joinstyle='round', zorder=10)
-            self._xs_sketch_current = (line,)
-            self._xs_sketch_objects.append(line)
+            ctrl = False
+            try:
+                ctrl = self.parent_dock._ctrl_tracker.ctrl_held
+                if not ctrl:
+                    ctrl = bool(QApplication.queryKeyboardModifiers() & _CTRL_MOD)
+            except Exception:
+                ctrl = False
+            if ctrl:
+                self._xs_sketch_pressed = False
+                if not self._xs_pen_poly_mode:
+                    self._xs_pen_poly_mode = True
+                    self._xs_pen_poly_pts  = ([fx], [fy])
+                    line, = ax.plot(
+                        [fx, fx], [fy, fy],
+                        color=self._xs_sketch_color, linewidth=self._xs_sketch_lw,
+                        linestyle=self._xs_sketch_ls,
+                        solid_capstyle='round', solid_joinstyle='round', zorder=10
+                    )
+                    self._xs_pen_poly_art = line
+                    self._xs_sketch_objects.append(line)
+                else:
+                    self._xs_pen_poly_pts[0].append(fx)
+                    self._xs_pen_poly_pts[1].append(fy)
+                    self._xs_pen_poly_art.set_data(*self._xs_pen_poly_pts)
+                self.canvas_xs.draw_idle()
+                return
+            else:
+                if self._xs_pen_poly_mode:
+                    self._xs_pen_poly_pts[0].append(fx)
+                    self._xs_pen_poly_pts[1].append(fy)
+                    self._xs_pen_poly_art.set_data(*self._xs_pen_poly_pts)
+                    self._xs_pen_poly_mode = False
+                    self._xs_pen_poly_pts  = ([], [])
+                    self._xs_pen_poly_art  = None
+                    self._xs_sketch_pressed = False
+                    self.canvas_xs.draw_idle()
+                    return
+                # Normal freehand pen
+                self._xs_sketch_pen_pts = ([fx], [fy])
+                line, = ax.plot([fx], [fy],
+                                color=self._xs_sketch_color, linewidth=self._xs_sketch_lw,
+                                linestyle=self._xs_sketch_ls,
+                                solid_capstyle='round', solid_joinstyle='round', zorder=10)
+                self._xs_sketch_current = (line,)
+                self._xs_sketch_objects.append(line)
 
         elif self._xs_sketch_mode == 'line':
             line, = ax.plot([fx, fx], [fy, fy],
@@ -4460,6 +4598,15 @@ class XSectionDialog(QDialog):
         self.canvas_xs.draw_idle()
 
     def _xs_sketch_on_motion(self, event):
+        # Ctrl+pen polyline: live rubber band without holding mouse button
+        if (self._xs_pen_poly_mode and self._xs_pen_poly_art is not None
+                and event.inaxes == self.ax
+                and event.xdata is not None and event.ydata is not None):
+            xs = list(self._xs_pen_poly_pts[0]) + [event.xdata]
+            ys = list(self._xs_pen_poly_pts[1]) + [event.ydata]
+            self._xs_pen_poly_art.set_data(xs, ys)
+            self.canvas_xs.draw_idle()
+            return
         if not self._xs_sketch_pressed or self._xs_sketch_mode is None:
             return
         if event.inaxes != self.ax or event.xdata is None:
