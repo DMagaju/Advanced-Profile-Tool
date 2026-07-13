@@ -18,20 +18,21 @@ GROUP_NAME     = 'Advanced Flood & Terrain Auditor'
 _LINKED_PROMPT = 'FTA_Normal_Profile_V01_GM.txt'
 
 import csv
+import math
 import os
 from collections import defaultdict
 from datetime import datetime
 
-from qgis.PyQt.QtCore import Qt, pyqtSignal, QTimer
+from qgis.PyQt.QtCore import Qt, pyqtSignal, QTimer, QSizeF, QPointF
 from qgis.PyQt.QtWidgets import (
     QAction, QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QDoubleSpinBox, QPushButton, QLineEdit,
     QFileDialog, QGroupBox, QFrame, QSizePolicy, QMessageBox,
     QApplication, QCheckBox, QComboBox, QColorDialog, QScrollArea,
     QListWidget, QListWidgetItem, QTabWidget, QInputDialog, QProgressBar,
-    QSpinBox, QDialog,
+    QSpinBox, QDialog, QMenu,
 )
-from qgis.PyQt.QtGui import QColor, QIcon, QPixmap, QPainter, QPen, QStandardItem, QStandardItemModel
+from qgis.PyQt.QtGui import QColor, QIcon, QPixmap, QPainter, QPen, QStandardItem, QStandardItemModel, QTextDocument, QCursor
 
 from qgis.gui import QgsMapLayerComboBox, QgsFieldComboBox, QgsRubberBand
 from qgis.core import (
@@ -76,8 +77,10 @@ except AttributeError:
 
 try:
     _ICON_CIRCLE = QgsRubberBand.IconType.ICON_CIRCLE
+    _ICON_X      = QgsRubberBand.IconType.ICON_X
 except AttributeError:
     _ICON_CIRCLE = QgsRubberBand.ICON_CIRCLE  # type: ignore[attr-defined]
+    _ICON_X      = QgsRubberBand.ICON_X       # type: ignore[attr-defined]
 
 try:
     _VECTOR_FILTER = QgsMapLayerProxyModel.Filter.VectorLayer
@@ -170,6 +173,12 @@ def _thin_sep():
     return line
 
 
+def _data_to_axfrac(ax, xdata, ydata):
+    """Convert data-space coords to axes-fraction (0–1) coords."""
+    disp = ax.transData.transform((xdata, ydata))
+    return tuple(ax.transAxes.inverted().transform(disp))
+
+
 def _to_hex_color(c) -> str:
     """Convert any matplotlib color spec (including RGBA tuple) to '#rrggbb'."""
     try:
@@ -177,6 +186,131 @@ def _to_hex_color(c) -> str:
         return _mc.to_hex(c)
     except Exception:
         return '#000000'
+
+
+_LEVEL_CURSOR   = None   # module-level cache; built once on first use
+_TRI_TIP_PATH   = None   # custom marker: down-triangle with tip at (0,0)
+
+
+def _get_tri_tip_path():
+    """Inverted triangle marker path whose tip vertex is at the origin (0, 0).
+
+    When used as a matplotlib marker this means the pointed tip lands exactly
+    on the data coordinate, rather than the bounding-box centre.
+    """
+    global _TRI_TIP_PATH
+    if _TRI_TIP_PATH is None:
+        try:
+            import numpy as _np2
+            from matplotlib.path import Path as _P2
+            # tip at (0,0); base corners at (±1, 2) → 2 units above in marker space
+            _TRI_TIP_PATH = _P2(
+                _np2.array([[0., 0.], [-1., 2.], [1., 2.], [0., 0.]]),
+                [_P2.MOVETO, _P2.LINETO, _P2.LINETO, _P2.CLOSEPOLY])
+        except Exception:
+            _TRI_TIP_PATH = 'v'   # safe fallback
+    return _TRI_TIP_PATH
+
+
+def _get_level_cursor():
+    """Return a QCursor shaped as a downward-pointing triangle (▼)."""
+    global _LEVEL_CURSOR
+    if _LEVEL_CURSOR is not None:
+        return _LEVEL_CURSOR
+    try:
+        from qgis.PyQt.QtCore import QPoint
+        from qgis.PyQt.QtGui import QPolygon
+        s = 22
+        pix = QPixmap(s, s)
+        pix.fill(QColor(0, 0, 0, 0))   # transparent background
+        p = QPainter(pix)
+        try:
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        except AttributeError:
+            p.setRenderHint(QPainter.Antialiasing)  # type: ignore
+        pen = QPen(QColor('#111111'))
+        pen.setWidthF(1.5)
+        p.setPen(pen)
+        p.setBrush(QColor('#111111'))
+        poly = QPolygon([QPoint(s // 2, s - 2), QPoint(2, 2), QPoint(s - 2, 2)])
+        p.drawPolygon(poly)
+        p.end()
+        _LEVEL_CURSOR = QCursor(pix, s // 2, s - 2)   # hotspot at bottom tip
+    except Exception:
+        try:
+            _LEVEL_CURSOR = QCursor(Qt.CursorShape.CrossCursor)
+        except AttributeError:
+            _LEVEL_CURSOR = QCursor(Qt.CrossCursor)   # type: ignore
+    return _LEVEL_CURSOR
+
+
+def _snap_level(ax, xd, yd, vertex_frac=0.03, segment_frac=0.05):
+    """Snap to the nearest vertex or segment of any visible Line2D.
+
+    Vertex pass first (normalised 2-D distance < vertex_frac).
+    If no vertex found, falls back to segment interpolation (Y distance
+    < segment_frac of Y range).
+
+    Returns (snapped_x, snapped_y, color_hex, snap_type) where snap_type
+    is 'vertex', 'segment', or None (no snap).
+    """
+    try:
+        import numpy as _np
+        xl, xr = ax.get_xlim()
+        yb, yt = ax.get_ylim()
+        x_range = max(abs(xr - xl), 1e-9)
+        y_range = max(abs(yt - yb), 1e-9)
+
+        # --- Vertex pass ---
+        v_thresh_sq = vertex_frac ** 2
+        best_vd_sq = v_thresh_sq
+        best_vx, best_vy, best_vcol = None, None, None
+        for line in ax.get_lines():
+            if not line.get_visible():
+                continue
+            xdata = _np.asarray(line.get_xdata(), dtype=float)
+            ydata = _np.asarray(line.get_ydata(), dtype=float)
+            if len(xdata) < 1:
+                continue
+            dx = (xdata - xd) / x_range
+            dy = (ydata - yd) / y_range
+            dist_sq = dx * dx + dy * dy
+            idx = int(_np.argmin(dist_sq))
+            if dist_sq[idx] < best_vd_sq:
+                best_vd_sq = dist_sq[idx]
+                best_vx = float(xdata[idx])
+                best_vy = float(ydata[idx])
+                best_vcol = _to_hex_color(line.get_color())
+        if best_vx is not None:
+            return (best_vx, best_vy, best_vcol, 'vertex')
+
+        # --- Segment pass (interpolation along line) ---
+        seg_thresh = segment_frac * y_range
+        best_sd = seg_thresh
+        best_sx, best_sy, best_scol = None, None, None
+        for line in ax.get_lines():
+            if not line.get_visible():
+                continue
+            xdata = _np.asarray(line.get_xdata(), dtype=float)
+            ydata = _np.asarray(line.get_ydata(), dtype=float)
+            if len(xdata) < 2:
+                continue
+            xmin, xmax = float(xdata.min()), float(xdata.max())
+            if xd < xmin or xd > xmax:
+                continue
+            yi = float(_np.interp(xd, xdata, ydata))
+            dist = abs(yi - yd)
+            if dist < best_sd:
+                best_sd = dist
+                best_sx = xd
+                best_sy = yi
+                best_scol = _to_hex_color(line.get_color())
+        if best_sx is not None:
+            return (best_sx, best_sy, best_scol, 'segment')
+
+        return (xd, yd, None, None)
+    except Exception:
+        return (xd, yd, None, None)
 
 
 def _color_btn(hex_color: str, tooltip: str = 'Change colour') -> QPushButton:
@@ -397,6 +531,7 @@ class NormalProfileDock(QDockWidget):
         self._sketch_current    = None    # in-progress artist tuple (varies by mode)
         self._sketch_pen_pts    = ([], [])
         self._sketch_pressed    = False
+        self._level_snap_art    = None    # temporary snap-indicator for level tool
         self._sketch_btns        = {}      # {mode: QPushButton}
         self._sketch_color_btn   = None    # active-color swatch
         self._sketch_drag_info   = None    # {obj, type, ...} set by 'move' press handler
@@ -405,6 +540,11 @@ class NormalProfileDock(QDockWidget):
         self._sketch_lw_spin        = None    # widget ref
         self._sketch_ls_combo       = None    # widget ref
         self._sketch_pending_specs  = None    # saved across _rebuild_figure + _refresh_plot
+        self._ch_cursors          = []   # [{'chainage': float, 'ax_idx': int, 'name': str}, ...]
+        self._ch_cursor_artists   = []   # [list_of_artists_per_cursor, ...] parallel list
+        self._ch_cursor_map_bands = []   # QgsRubberBand markers on the map canvas
+        self._ch_cursor_annotations = [] # QgsTextAnnotation name labels on map canvas
+        self._xs_dialogs          = []   # open XSectionDialog instances for cut/fill sync
         self._color_idx          = 0
         self._has_xsec_plot      = False
         self._xsec_dd            = None
@@ -577,6 +717,9 @@ class NormalProfileDock(QDockWidget):
         self.btn_draw.setChecked(False)
         self._profile_chainages  = []
         self._profile_data_store = {}
+        self._ch_cursors         = []
+        self._ch_cursor_artists  = []
+        self._clear_cursor_map_points()
         self.lbl_line.setText('Profile line: not drawn')
         self.lbl_line.setStyleSheet('color:gray;font-style:italic;font-size:11px;')
         self.lbl_status.setText('')
@@ -821,7 +964,7 @@ class NormalProfileDock(QDockWidget):
         cr = QHBoxLayout()
         cr.addWidget(QLabel('Result Folder:'))
         self.csv_edit = QLineEdit()
-        self.csv_edit.setPlaceholderText('Select folder to save results — leave blank to skip')
+        self.csv_edit.setPlaceholderText('Leave blank to auto-save to Downloads/ProfilePlot_<Date>')
         btn_csv = QPushButton('...')
         btn_csv.setFixedWidth(28)
         btn_csv.clicked.connect(self._browse_result_folder)
@@ -941,11 +1084,13 @@ class NormalProfileDock(QDockWidget):
                 ('line',   'Line',   'Straight line — click and drag'),
                 ('arrow',  '→',      'Arrow — drag from tail to head'),
                 ('text',   'Text',   'Text annotation — click to place'),
+                ('level',  '▽',      'Level marker — click (or near a profile line to snap) to place a water-level line'),
                 ('rect',   'Rect',   'Rectangle — click and drag'),
                 ('circle', '○',      'Circle / Ellipse — drag from centre; hold Shift for perfect circle'),
                 ('eraser', '✕',      'Eraser — click or drag over annotations to remove'),
                 ('move',   '⇔',      'Move — click and drag any annotation to reposition'),
                 ('edit',   '✎',      'Edit — click an annotation to change its colour, thickness or text style'),
+                ('cursor', '⌇',      'Chainage cursor — click to drop a permanent reference line with C/F value'),
             ]
             _tool_style = (
                 'QPushButton{font-size:10px;border:1px solid #B0BEC5;'
@@ -976,6 +1121,17 @@ class NormalProfileDock(QDockWidget):
             )
             _btn_clr.clicked.connect(self._sketch_clear)
             _sk_bar.addWidget(_btn_clr)
+
+            _btn_xs = QPushButton('⊥ XS')
+            _btn_xs.setFixedSize(48, 22)
+            _btn_xs.setToolTip('Show cross-section at a placed chainage cursor')
+            _btn_xs.setStyleSheet(
+                'font-size:10px;border:1px solid #90CAF9;border-radius:3px;'
+                'background:#E3F2FD;color:#1565C0;'
+            )
+            _btn_xs.clicked.connect(self._open_xs_menu)
+            self._xs_btn = _btn_xs
+            _sk_bar.addWidget(_btn_xs)
             plot_outer.addLayout(_sk_bar)
 
             # ── Sketch toolbar — Row 2: style options + colours ────────────────
@@ -1096,7 +1252,7 @@ class NormalProfileDock(QDockWidget):
             if i < len(all_p) - 1:
                 ax_i.tick_params(labelbottom=False)   # hide x labels on non-bottom axes
             else:
-                ax_i.set_xlabel('Chainage (m)', fontsize=9)
+                ax_i.set_xlabel('Chainage [m]', fontsize=9)
         self.ax.set_title('Normal Profile', fontsize=10, fontweight='bold')
 
         if self.ax_xsec is not None:
@@ -1118,6 +1274,7 @@ class NormalProfileDock(QDockWidget):
             return
         self._sketch_pending_specs = self._sketch_serialise()  # save before figure wipe
         self.figure.clear()
+        self._ch_cursor_artists = []   # artists gone after figure.clear()
         self._cursor_lines   = []
         self._cc_hlines      = []
         self._xsec_hline     = None
@@ -1310,8 +1467,12 @@ class NormalProfileDock(QDockWidget):
         if self._perm_band:
             self.canvas.scene().removeItem(self._perm_band)
         self._perm_band = QgsRubberBand(self.canvas, _LINE_GEOM)
-        self._perm_band.setColor(QColor(33, 150, 243, 200))
-        self._perm_band.setWidth(2)
+        self._perm_band.setColor(QColor(57, 255, 20, 255))
+        self._perm_band.setWidth(3)
+        try:
+            self._perm_band.setLineStyle(Qt.PenStyle.SolidLine)
+        except AttributeError:
+            self._perm_band.setLineStyle(Qt.SolidLine)  # type: ignore[attr-defined]
         self._perm_band.setToGeometry(geom, None)
         self.lbl_line.setText(f'Profile line: {geom.length():.2f} m — ready.')
         self.lbl_line.setStyleSheet('color:#43A047;font-style:italic;font-size:11px;')
@@ -1323,6 +1484,9 @@ class NormalProfileDock(QDockWidget):
         self.profile_geom        = None
         self._profile_chainages  = []
         self._profile_data_store = {}
+        self._ch_cursors         = []
+        self._ch_cursor_artists  = []
+        self._clear_cursor_map_points()
         if self._perm_band:
             self.canvas.scene().removeItem(self._perm_band)
             self._perm_band = None
@@ -1419,7 +1583,7 @@ class NormalProfileDock(QDockWidget):
 
         # Sketch tool motion (suppress hover cursor while drawing)
         if (self._sketch_pressed and self._sketch_mode is not None
-                and event.xdata is not None and event.ydata is not None):
+                and event.x is not None and event.y is not None):
             self._sketch_on_motion(event)
             return
 
@@ -1445,6 +1609,26 @@ class NormalProfileDock(QDockWidget):
         all_p = [self.ax] + self._extra_axes
         if event.inaxes not in all_p or event.xdata is None:
             self._hide_hover(); return
+
+        # Level tool: update persistent snap indicator (+) in place
+        if self._sketch_mode == 'level':
+            if self._level_snap_art is not None:
+                ax = event.inaxes
+                snapped_x, snapped_y, snap_col, snap_type = _snap_level(ax, event.xdata, event.ydata)
+                col = snap_col or '#888888'
+                self._level_snap_art.set_data([snapped_x], [snapped_y])
+                if snap_type == 'vertex':
+                    self._level_snap_art.set_marker('s')
+                    self._level_snap_art.set_markersize(8)
+                    self._level_snap_art.set_markerfacecolor('none')
+                else:
+                    self._level_snap_art.set_marker('+')
+                    self._level_snap_art.set_markersize(13)
+                self._level_snap_art.set_markeredgecolor(col)
+                self._level_snap_art.set_alpha(1.0 if snap_col else 0.5)
+                self._level_snap_art.set_visible(True)
+                self.canvas_plot.draw_idle()
+            return
 
         total = self.profile_geom.length()
         ch = max(0.0, min(float(event.xdata), total))
@@ -1651,6 +1835,21 @@ class NormalProfileDock(QDockWidget):
         for m, btn in self._sketch_btns.items():
             btn.setChecked(m == mode)
         self._sketch_mode = mode
+        if mode == 'level':
+            # Pre-create a persistent snap indicator so we never create/destroy
+            # it inside the hot motion path (that causes missed draws).
+            if self._level_snap_art is not None:
+                try: self._level_snap_art.remove()
+                except Exception: pass
+                self._level_snap_art = None
+            if MATPLOTLIB_AVAILABLE and hasattr(self, 'ax'):
+                try:
+                    self._level_snap_art, = self.ax.plot(
+                        [], [], marker='+', markersize=13, markeredgewidth=1.5,
+                        markerfacecolor='none', markeredgecolor='#888888',
+                        linestyle='none', zorder=30, clip_on=False, visible=False)
+                except Exception:
+                    pass
         try:
             _cs = Qt.CursorShape
             _cur = {
@@ -1672,6 +1871,13 @@ class NormalProfileDock(QDockWidget):
         self._sketch_mode    = None
         self._sketch_pressed = False
         self._sketch_current = None
+        if self._level_snap_art is not None:
+            try:
+                self._level_snap_art.remove()
+            except Exception:
+                pass
+            self._level_snap_art = None
+            self.canvas_plot.draw_idle()
         self.canvas_plot.unsetCursor()
 
     def _sketch_set_color(self, hex_color):
@@ -1707,7 +1913,7 @@ class NormalProfileDock(QDockWidget):
             try:
                 if isinstance(obj, _MplRect):
                     specs.append({
-                        't': 'rect',
+                        't': 'rect', 'coord': 'axfrac',
                         'xy': tuple(obj.get_xy()),
                         'w': obj.get_width(),
                         'h': obj.get_height(),
@@ -1717,7 +1923,7 @@ class NormalProfileDock(QDockWidget):
                     })
                 elif isinstance(obj, _MplEllipse):
                     specs.append({
-                        't': 'ellipse',
+                        't': 'ellipse', 'coord': 'axfrac',
                         'center': tuple(obj.center),
                         'w': obj.width,
                         'h': obj.height,
@@ -1728,7 +1934,7 @@ class NormalProfileDock(QDockWidget):
                 elif hasattr(obj, 'arrow_patch') and obj.arrow_patch is not None:
                     ap = obj.arrow_patch
                     specs.append({
-                        't': 'arrow',
+                        't': 'arrow', 'coord': 'axfrac',
                         'head': (float(obj.xy[0]), float(obj.xy[1])),
                         'tail': (float(obj.get_position()[0]), float(obj.get_position()[1])),
                         'ec': ap.get_edgecolor(),
@@ -1737,7 +1943,7 @@ class NormalProfileDock(QDockWidget):
                     })
                 elif hasattr(obj, 'get_text'):
                     specs.append({
-                        't': 'text',
+                        't': 'text', 'coord': 'axfrac',
                         'x': float(obj.get_position()[0]),
                         'y': float(obj.get_position()[1]),
                         'text': obj.get_text(),
@@ -1749,7 +1955,7 @@ class NormalProfileDock(QDockWidget):
                     })
                 elif hasattr(obj, 'get_xdata'):
                     specs.append({
-                        't': 'line2d',
+                        't': 'line2d', 'coord': 'axfrac',
                         'x': list(obj.get_xdata()),
                         'y': list(obj.get_ydata()),
                         'color': obj.get_color(),
@@ -1770,53 +1976,86 @@ class NormalProfileDock(QDockWidget):
         for s in specs:
             try:
                 t = s['t']
+                use_axfrac = s.get('coord') == 'axfrac'
+                tf = ax.transAxes if use_axfrac else None
                 if t == 'rect':
-                    p = _MplRect(s['xy'], s['w'], s['h'],
-                                 linewidth=s['lw'], linestyle=s['ls'],
-                                 edgecolor=s['ec'], facecolor='none', zorder=10)
+                    kw = dict(linewidth=s['lw'], linestyle=s['ls'],
+                              edgecolor=s['ec'], facecolor='none', zorder=10)
+                    if tf is not None:
+                        kw['transform'] = tf
+                    p = _MplRect(s['xy'], s['w'], s['h'], **kw)
                     ax.add_patch(p)
                     self._sketch_objects.append(p)
                 elif t == 'ellipse':
-                    p = _MplEllipse(s['center'], s['w'], s['h'],
-                                    linewidth=s['lw'], linestyle=s['ls'],
-                                    edgecolor=s['ec'], facecolor='none', zorder=10)
+                    kw = dict(linewidth=s['lw'], linestyle=s['ls'],
+                              edgecolor=s['ec'], facecolor='none', zorder=10)
+                    if tf is not None:
+                        kw['transform'] = tf
+                    p = _MplEllipse(s['center'], s['w'], s['h'], **kw)
                     ax.add_patch(p)
                     self._sketch_objects.append(p)
                 elif t == 'arrow':
-                    ann = ax.annotate(
-                        '', xy=s['head'], xytext=s['tail'],
-                        arrowprops=dict(arrowstyle='->', color=s['ec'],
-                                        lw=s['lw'], linestyle=s['ls']),
-                        zorder=10,
-                    )
+                    kw = dict(arrowprops=dict(arrowstyle='->', color=s['ec'],
+                                              lw=s['lw'], linestyle=s['ls']),
+                              zorder=10)
+                    if use_axfrac:
+                        kw['xycoords'] = 'axes fraction'
+                        kw['textcoords'] = 'axes fraction'
+                    ann = ax.annotate('', xy=s['head'], xytext=s['tail'], **kw)
                     self._sketch_objects.append(ann)
                 elif t == 'text':
-                    ann = ax.text(
-                        s['x'], s['y'], s['text'],
-                        color=s['color'],
-                        fontsize=s.get('fontsize', 9),
-                        fontweight=s.get('fontweight', 'bold'),
-                        fontstyle=s.get('fontstyle', 'normal'),
-                        fontfamily=s.get('fontfamily', 'sans-serif'),
-                        zorder=10,
-                        bbox=dict(boxstyle='round,pad=0.25', facecolor='white',
-                                  edgecolor=s['color'], alpha=0.85),
-                    )
+                    kw = dict(color=s['color'],
+                              fontsize=s.get('fontsize', 9),
+                              fontweight=s.get('fontweight', 'bold'),
+                              fontstyle=s.get('fontstyle', 'normal'),
+                              fontfamily=s.get('fontfamily', 'sans-serif'),
+                              zorder=10,
+                              bbox=dict(boxstyle='round,pad=0.25', facecolor='white',
+                                        edgecolor=s['color'], alpha=0.85))
+                    if tf is not None:
+                        kw['transform'] = tf
+                    ann = ax.text(s['x'], s['y'], s['text'], **kw)
                     self._sketch_objects.append(ann)
                 elif t == 'line2d':
-                    line, = ax.plot(
-                        s['x'], s['y'],
-                        color=s['color'], linewidth=s['lw'], linestyle=s['ls'],
-                        solid_capstyle=s.get('cap', 'round'),
-                        solid_joinstyle=s.get('join', 'round'),
-                        zorder=10,
-                    )
+                    kw = dict(color=s['color'], linewidth=s['lw'], linestyle=s['ls'],
+                              solid_capstyle=s.get('cap', 'round'),
+                              solid_joinstyle=s.get('join', 'round'),
+                              zorder=10)
+                    if tf is not None:
+                        kw['transform'] = tf
+                    line, = ax.plot(s['x'], s['y'], **kw)
                     self._sketch_objects.append(line)
             except Exception:
                 pass
 
     def _sketch_erase_at(self, event):
-        """Remove the topmost sketch object under the cursor."""
+        """Remove the topmost sketch object or chainage cursor under the cursor."""
+        # Check chainage cursors first (proximity in x)
+        ax = event.inaxes
+        if ax is not None and event.xdata is not None:
+            all_p = [self.ax] + self._extra_axes
+            ax_idx = all_p.index(ax) if ax in all_p else -1
+            xlim = ax.get_xlim()
+            tol = abs(xlim[1] - xlim[0]) * 0.015
+            for i, cursor in enumerate(self._ch_cursors):
+                if cursor['ax_idx'] == ax_idx and abs(cursor['chainage'] - event.xdata) < tol:
+                    if i < len(self._ch_cursor_artists):
+                        for _a in self._ch_cursor_artists[i]:
+                            try: _a.remove()
+                            except Exception: pass
+                        self._ch_cursor_artists.pop(i)
+                    erased_cursor = self._ch_cursors.pop(i)
+                    self._remove_cursor_map_point(i)
+                    # Close any open XS dialog that belongs to this cursor
+                    for _dlg in list(self._xs_dialogs):
+                        if _dlg.cursor is erased_cursor:
+                            try: _dlg.close()
+                            except Exception: pass
+                            break
+                    self.canvas_plot.draw_idle()
+                    return
+
+        # Sketch objects
         for obj in reversed(self._sketch_objects):
             try:
                 hit, _ = obj.contains(event)
@@ -2025,13 +2264,219 @@ class NormalProfileDock(QDockWidget):
         dlg.activateWindow()
         dlg.exec()
 
+    def _open_xs_menu(self):
+        """Show a dropdown listing all placed cursors; selecting one opens XSectionDialog."""
+        if not self._ch_cursors:
+            QMessageBox.information(
+                self, 'Cross-Section',
+                'No chainage cursors placed yet.\nUse the ⌇ cursor tool to place cursors first.')
+            return
+        menu = QMenu(self)
+        for i, cursor in enumerate(self._ch_cursors):
+            name = cursor.get('name', f'XS-{i+1:03d}')
+            ch   = cursor['chainage']
+            act  = menu.addAction(f'{name}  —  Ch: {ch:.1f} m')
+            act.setData(i)
+        chosen = menu.exec(QCursor.pos())
+        if chosen is not None:
+            self._open_xs_dialog(chosen.data())
+
+    def _open_xs_dialog(self, cursor_idx):
+        """Open (or re-raise) the cross-section dialog for the given cursor index."""
+        if cursor_idx >= len(self._ch_cursors):
+            return
+        cursor = self._ch_cursors[cursor_idx]
+        dlg = XSectionDialog(self, cursor)
+        self._xs_dialogs.append(dlg)
+        dlg.finished.connect(
+            lambda _r, d=dlg: self._xs_dialogs.remove(d) if d in self._xs_dialogs else None)
+        dlg.show()
+        dlg.raise_()
+
+    def _make_perp_line_geom(self, chainage, left_m, right_m):
+        """Return a QgsGeometry line perpendicular to the profile at the given chainage.
+
+        'Left' is the CCW direction from the tangent (left when walking along profile).
+        The returned line runs from the left end to the right end.
+        """
+        if self.profile_geom is None:
+            return None
+        total  = self.profile_geom.length()
+        delta  = min(0.5, chainage, total - chainage)
+        delta  = max(delta, 0.001)
+        ch1    = max(0.0, chainage - delta)
+        ch2    = min(total, chainage + delta)
+        pt1    = self.profile_geom.interpolate(ch1).asPoint()
+        pt2    = self.profile_geom.interpolate(ch2).asPoint()
+        dx, dy = pt2.x() - pt1.x(), pt2.y() - pt1.y()
+        dist   = math.sqrt(dx * dx + dy * dy)
+        if dist < 1e-10:
+            return None
+        tx, ty = dx / dist, dy / dist   # tangent unit vector
+        px, py = -ty, tx                # perpendicular CCW = "left"
+        ctr    = self.profile_geom.interpolate(chainage).asPoint()
+        cx, cy = ctr.x(), ctr.y()
+        l_pt   = QgsPointXY(cx + px * left_m,  cy + py * left_m)
+        r_pt   = QgsPointXY(cx - px * right_m, cy - py * right_m)
+        return QgsGeometry.fromPolylineXY([l_pt, r_pt])
+
+    def _refresh_chainage_cursors(self):
+        """Rebuild all permanent chainage cursor artists from self._ch_cursors."""
+        import matplotlib.transforms as _mt
+        # Remove stale artists (axes may have been cleared)
+        for artist_list in self._ch_cursor_artists:
+            for _a in artist_list:
+                try: _a.remove()
+                except Exception: pass
+        self._ch_cursor_artists = []
+
+        if not self._ch_cursors or not MATPLOTLIB_AVAILABLE:
+            return
+        all_p = [self.ax] + self._extra_axes
+        xs = (np.array(self._profile_chainages, dtype=float)
+              if self._profile_chainages else None)
+
+        _bbox_kw = dict(boxstyle='round,pad=0.2', facecolor='white',
+                        edgecolor='#212121', alpha=0.85, linewidth=0.5)
+        _bbox_dy = dict(boxstyle='round,pad=0.2', facecolor='white',
+                        edgecolor='#D32F2F', alpha=0.85, linewidth=0.5)
+
+        for cursor in self._ch_cursors:
+            ch      = cursor['chainage']
+            ax_idx  = cursor['ax_idx']
+            if ax_idx >= len(all_p):
+                ax_idx = 0
+            ax_c = all_p[ax_idx]
+
+            # Cut/fill ΔY at this chainage
+            cf_val = None
+            if xs is not None and len(xs) > 1:
+                cfg_j = self._win_cfgs[ax_idx] if ax_idx < len(self._win_cfgs) else None
+                if (cfg_j is not None and self._active_tab != 2
+                        and cfg_j['cutfill_cb'].isChecked()
+                        and cfg_j['cf_y1'].count() > 0
+                        and cfg_j['cf_y2'].count() > 0):
+                    y1k = cfg_j['cf_y1'].currentText()
+                    y2k = cfg_j['cf_y2'].currentText()
+                    pd  = self._profile_data_store
+                    if y1k in pd and y2k in pd and y1k != y2k:
+                        y1a = np.array([v if v is not None else np.nan
+                                        for v in pd[y1k]], dtype=float)
+                        y2a = np.array([v if v is not None else np.nan
+                                        for v in pd[y2k]], dtype=float)
+                        _v = float(np.interp(ch, xs, y2a - y1a))
+                        if np.isfinite(_v):
+                            cf_val = _v
+
+            blend = _mt.blended_transform_factory(ax_c.transData, ax_c.transAxes)
+
+            vline = ax_c.axvline(x=ch, color='#212121', linewidth=0.5,
+                                 linestyle='-.', zorder=8, alpha=0.85)
+
+            # Top-left: X = chainage [+ ΔY on next line when cut/fill active]
+            # Both in one text box so they sit side-by-side along the cursor line
+            # and never crowd each other or the opposite side.
+            if cf_val is not None:
+                top_text  = f'X = {ch:.1f} m\nΔY: {cf_val:+.3f} m'
+                top_bbox  = dict(boxstyle='round,pad=0.2', facecolor='white',
+                                 edgecolor='#D32F2F', alpha=0.85, linewidth=0.5)
+                top_color = '#212121'
+            else:
+                top_text  = f'X = {ch:.1f} m'
+                top_bbox  = _bbox_kw
+                top_color = '#212121'
+
+            lbl_top = ax_c.text(
+                ch, 0.97, top_text,
+                transform=blend, rotation=90, rotation_mode='anchor',
+                fontsize=7, color=top_color,
+                ha='right', va='top', zorder=11,
+                bbox=top_bbox)
+
+            # Bottom-right: XS name
+            lbl_name = ax_c.text(
+                ch, 0.03, cursor.get('name', ''),
+                transform=blend, rotation=90, rotation_mode='anchor',
+                fontsize=7, color='#212121',
+                ha='left', va='bottom', zorder=11,
+                bbox=_bbox_kw)
+
+            self._ch_cursor_artists.append([vline, lbl_top, lbl_name])
+
+    def _add_cursor_map_point(self, chainage, name=''):
+        """Place a filled blue circle marker and name annotation on the map canvas."""
+        if self.profile_geom is None:
+            self._ch_cursor_map_bands.append(None)
+            self._ch_cursor_annotations.append(None)
+            return
+        try:
+            pt = self.profile_geom.interpolate(chainage).asPoint()
+            band = QgsRubberBand(self.canvas, _POINT_GEOM)
+            band.setIcon(_ICON_CIRCLE)
+            band.setIconSize(12)
+            band.setColor(QColor(21, 101, 192, 230))
+            try:
+                band.setFillColor(QColor(21, 101, 192, 200))
+            except Exception:
+                band.setIcon(_ICON_X)
+            band.addPoint(QgsPointXY(pt))
+            self._ch_cursor_map_bands.append(band)
+        except Exception:
+            self._ch_cursor_map_bands.append(None)
+
+        # Text annotation showing the cursor name
+        ann = None
+        if name and self.profile_geom is not None:
+            try:
+                from qgis.core import QgsTextAnnotation
+                pt2 = self.profile_geom.interpolate(chainage).asPoint()
+                ann = QgsTextAnnotation()
+                doc = QTextDocument()
+                doc.setPlainText(name)
+                ann.setDocument(doc)
+                ann.setMapPosition(QgsGeometry.fromPointXY(QgsPointXY(pt2.x(), pt2.y())))
+                ann.setHasFixedMapPosition(True)
+                ann.setFrameSize(QSizeF(52, 18))
+                ann.setFrameOffsetFromReferencePoint(QPointF(10, -22))
+                QgsProject.instance().annotationManager().addAnnotation(ann)
+            except Exception:
+                ann = None
+        self._ch_cursor_annotations.append(ann)
+
+    def _remove_cursor_map_point(self, idx):
+        """Remove the map marker and annotation at the given cursor index."""
+        if idx < len(self._ch_cursor_map_bands):
+            band = self._ch_cursor_map_bands.pop(idx)
+            if band is not None:
+                try: self.canvas.scene().removeItem(band)
+                except Exception: pass
+        if idx < len(self._ch_cursor_annotations):
+            ann = self._ch_cursor_annotations.pop(idx)
+            if ann is not None:
+                try: QgsProject.instance().annotationManager().removeAnnotation(ann)
+                except Exception: pass
+
+    def _clear_cursor_map_points(self):
+        """Remove all permanent cursor map markers and annotations."""
+        for band in self._ch_cursor_map_bands:
+            if band is not None:
+                try: self.canvas.scene().removeItem(band)
+                except Exception: pass
+        self._ch_cursor_map_bands = []
+        for ann in self._ch_cursor_annotations:
+            if ann is not None:
+                try: QgsProject.instance().annotationManager().removeAnnotation(ann)
+                except Exception: pass
+        self._ch_cursor_annotations = []
+
     def _sketch_on_press(self, event):
-        self._sketch_pressed    = True
-        self._sketch_press_data = (event.xdata, event.ydata)
+        self._sketch_pressed = True
         ax = event.inaxes
+        fx, fy = event.xdata, event.ydata
+        self._sketch_press_data = (fx, fy)
 
         if self._sketch_mode == 'pen':
-            self._sketch_pen_pts = ([event.xdata], [event.ydata])
+            self._sketch_pen_pts = ([fx], [fy])
             line, = ax.plot(
                 self._sketch_pen_pts[0], self._sketch_pen_pts[1],
                 color=self._sketch_color, linewidth=self._sketch_lw,
@@ -2043,7 +2488,7 @@ class NormalProfileDock(QDockWidget):
 
         elif self._sketch_mode == 'line':
             line, = ax.plot(
-                [event.xdata, event.xdata], [event.ydata, event.ydata],
+                [fx, fx], [fy, fy],
                 color=self._sketch_color, linewidth=self._sketch_lw,
                 linestyle=self._sketch_ls,
                 solid_capstyle='round', zorder=10
@@ -2053,8 +2498,8 @@ class NormalProfileDock(QDockWidget):
 
         elif self._sketch_mode == 'arrow':
             ann = ax.annotate(
-                '', xy=(event.xdata, event.ydata),
-                xytext=(event.xdata, event.ydata),
+                '', xy=(fx, fy), xytext=(fx, fy),
+                xycoords='data', textcoords='data',
                 arrowprops=dict(arrowstyle='->', color=self._sketch_color,
                                 lw=self._sketch_lw, linestyle=self._sketch_ls),
                 zorder=10
@@ -2064,13 +2509,13 @@ class NormalProfileDock(QDockWidget):
 
         elif self._sketch_mode == 'rect':
             rect = _MplRect(
-                (event.xdata, event.ydata), 0, 0,
+                (fx, fy), 0, 0,
                 linewidth=self._sketch_lw, linestyle=self._sketch_ls,
                 edgecolor=self._sketch_color,
                 facecolor='none', zorder=10
             )
             ax.add_patch(rect)
-            self._sketch_current = (rect, ax, event.xdata, event.ydata)
+            self._sketch_current = (rect, ax, fx, fy)
             self._sketch_objects.append(rect)
 
         elif self._sketch_mode == 'text':
@@ -2079,7 +2524,7 @@ class NormalProfileDock(QDockWidget):
                 self.canvas_plot, 'Add Annotation', 'Text:')
             if ok and text.strip():
                 ann = ax.text(
-                    event.xdata, event.ydata, text.strip(),
+                    fx, fy, text.strip(),
                     color=self._sketch_color, fontsize=9, fontweight='bold',
                     zorder=10,
                     bbox=dict(boxstyle='round,pad=0.25', facecolor='white',
@@ -2089,18 +2534,55 @@ class NormalProfileDock(QDockWidget):
                 self.canvas_plot.draw_idle()
             return
 
+        elif self._sketch_mode == 'level':
+            self._sketch_pressed = False
+            # Hide snap indicator while placing (keep the persistent artist alive)
+            if self._level_snap_art is not None:
+                self._level_snap_art.set_visible(False)
+            snapped_x, snapped_y, snap_col, _ = _snap_level(ax, event.xdata, event.ydata)
+            col = snap_col or self._sketch_color
+            # Custom path: tip at (0,0) so the point touches the data coordinate
+            lvl_tri, = ax.plot(
+                [snapped_x], [snapped_y],
+                marker=_get_tri_tip_path(), markersize=14, linestyle='none',
+                markerfacecolor=col, markeredgecolor=col,
+                markeredgewidth=1.0, zorder=11)
+            lvl_ann = ax.annotate(
+                f'{snapped_y:.3f}',
+                xy=(snapped_x, snapped_y), xycoords='data',
+                xytext=(7, 2), textcoords='offset points',
+                fontsize=7, color=col, va='bottom', ha='left',
+                zorder=11, annotation_clip=False,
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                          edgecolor='none', alpha=0.85))
+            self._sketch_objects.append(lvl_tri)
+            self._sketch_objects.append(lvl_ann)
+            self.canvas_plot.draw_idle()
+            return
+
         elif self._sketch_mode == 'circle':
             if not MATPLOTLIB_AVAILABLE:
                 return
             ellipse = _MplEllipse(
-                (event.xdata, event.ydata), 0, 0,
+                (fx, fy), 0, 0,
                 linewidth=self._sketch_lw, linestyle=self._sketch_ls,
                 edgecolor=self._sketch_color,
                 facecolor='none', zorder=10
             )
             ax.add_patch(ellipse)
-            self._sketch_current = (ellipse, ax, event.xdata, event.ydata)
+            self._sketch_current = (ellipse, ax, fx, fy)
             self._sketch_objects.append(ellipse)
+
+        elif self._sketch_mode == 'cursor':
+            self._sketch_pressed = False
+            all_p = [self.ax] + self._extra_axes
+            ax_idx = all_p.index(ax) if ax in all_p else 0
+            name = f'XS-{len(self._ch_cursors) + 1:03d}'
+            self._ch_cursors.append({'chainage': event.xdata, 'ax_idx': ax_idx, 'name': name})
+            self._add_cursor_map_point(event.xdata, name)
+            self._refresh_chainage_cursors()
+            self.canvas_plot.draw_idle()
+            return
 
         elif self._sketch_mode == 'eraser':
             self._sketch_erase_at(event)
@@ -2121,34 +2603,34 @@ class NormalProfileDock(QDockWidget):
                     cx, cy = obj.center
                     self._sketch_drag_info = {
                         'obj': obj, 'type': 'ellipse',
-                        'ox': cx - event.xdata, 'oy': cy - event.ydata,
+                        'ox': cx - fx, 'oy': cy - fy,
                     }
                 elif isinstance(obj, _MplRect):
                     bx, by = obj.get_xy()
                     self._sketch_drag_info = {
                         'obj': obj, 'type': 'rect',
-                        'ox': bx - event.xdata, 'oy': by - event.ydata,
+                        'ox': bx - fx, 'oy': by - fy,
                     }
                 elif hasattr(obj, 'arrow_patch') and obj.arrow_patch is not None:
                     hx, hy = float(obj.xy[0]), float(obj.xy[1])
                     tx, ty = obj.get_position()
                     self._sketch_drag_info = {
                         'obj': obj, 'type': 'arrow',
-                        'hox': hx - event.xdata, 'hoy': hy - event.ydata,
-                        'tox': tx - event.xdata, 'toy': ty - event.ydata,
+                        'hox': hx - fx, 'hoy': hy - fy,
+                        'tox': tx - fx, 'toy': ty - fy,
                     }
                 elif hasattr(obj, 'get_text') and obj.get_text():
                     px, py = obj.get_position()
                     self._sketch_drag_info = {
                         'obj': obj, 'type': 'text',
-                        'ox': px - event.xdata, 'oy': py - event.ydata,
+                        'ox': px - fx, 'oy': py - fy,
                     }
                 elif hasattr(obj, 'get_xdata'):
                     self._sketch_drag_info = {
                         'obj': obj, 'type': 'line2d',
                         'x0': list(obj.get_xdata()),
                         'y0': list(obj.get_ydata()),
-                        'px': event.xdata, 'py': event.ydata,
+                        'px': fx, 'py': fy,
                     }
                 if self._sketch_drag_info:
                     break
@@ -2187,33 +2669,36 @@ class NormalProfileDock(QDockWidget):
         _no_current_ok = self._sketch_mode in ('eraser', 'move', 'edit')
         if not self._sketch_current and not _no_current_ok:
             return
-        x, y = event.xdata, event.ydata
+        ax = event.inaxes
+        if ax is None or event.xdata is None or event.ydata is None:
+            return
+        fx, fy = event.xdata, event.ydata
 
         if self._sketch_mode == 'pen':
-            line, ax = self._sketch_current
-            self._sketch_pen_pts[0].append(x)
-            self._sketch_pen_pts[1].append(y)
+            line, _ax = self._sketch_current
+            self._sketch_pen_pts[0].append(fx)
+            self._sketch_pen_pts[1].append(fy)
             line.set_data(self._sketch_pen_pts[0], self._sketch_pen_pts[1])
 
         elif self._sketch_mode == 'line':
-            line, ax = self._sketch_current
-            x0, y0 = self._sketch_press_data
-            line.set_data([x0, x], [y0, y])
+            line, _ax = self._sketch_current
+            x0, y0 = self._sketch_press_data  # already ax-frac
+            line.set_data([x0, fx], [y0, fy])
 
         elif self._sketch_mode == 'arrow':
-            ann, ax = self._sketch_current
-            ann.xy = (x, y)
+            ann, _ax = self._sketch_current
+            ann.xy = (fx, fy)
 
         elif self._sketch_mode == 'rect':
-            rect, ax, x0, y0 = self._sketch_current
-            rect.set_xy((min(x0, x), min(y0, y)))
-            rect.set_width(abs(x - x0))
-            rect.set_height(abs(y - y0))
+            rect, _ax, x0, y0 = self._sketch_current  # x0, y0 already ax-frac
+            rect.set_xy((min(x0, fx), min(y0, fy)))
+            rect.set_width(abs(fx - x0))
+            rect.set_height(abs(fy - y0))
 
         elif self._sketch_mode == 'circle':
-            ellipse, ax, x0, y0 = self._sketch_current
-            dx = abs(x - x0)
-            dy = abs(y - y0)
+            ellipse, _ax, x0, y0 = self._sketch_current  # x0, y0 already ax-frac
+            dx = abs(fx - x0)
+            dy = abs(fy - y0)
             if event.key == 'shift':
                 dx = dy = max(dx, dy)
             ellipse.set_width(2 * dx)
@@ -2229,18 +2714,19 @@ class NormalProfileDock(QDockWidget):
                 return
             obj = d['obj']
             if d['type'] == 'ellipse':
-                obj.set_center((x + d['ox'], y + d['oy']))
+                obj.set_center((fx + d['ox'], fy + d['oy']))
             elif d['type'] == 'rect':
-                obj.set_xy((x + d['ox'], y + d['oy']))
+                obj.set_xy((fx + d['ox'], fy + d['oy']))
             elif d['type'] == 'arrow':
-                obj.xy = (x + d['hox'], y + d['hoy'])
-                obj.set_position((x + d['tox'], y + d['toy']))
+                obj.xy = (fx + d['hox'], fy + d['hoy'])
+                obj.set_position((fx + d['tox'], fy + d['toy']))
             elif d['type'] == 'text':
-                obj.set_position((x + d['ox'], y + d['oy']))
+                obj.set_position((fx + d['ox'], fy + d['oy']))
             elif d['type'] == 'line2d':
-                dx = x - d['px'];  dy = y - d['py']
-                obj.set_data([v + dx for v in d['x0']],
-                             [v + dy for v in d['y0']])
+                ddx = fx - d['px']
+                ddy = fy - d['py']
+                obj.set_data([v + ddx for v in d['x0']],
+                             [v + ddy for v in d['y0']])
 
         self.canvas_plot.draw_idle()
 
@@ -2364,8 +2850,16 @@ class NormalProfileDock(QDockWidget):
 
     # ------------------------------------------------------------------ Save results / run
 
+    def _default_output_folder(self):
+        """Return ~/Downloads/ProfilePlot_YYYY-MM-DD, creating it if needed."""
+        downloads = os.path.join(os.path.expanduser('~'), 'Downloads')
+        folder = os.path.join(downloads, 'ProfilePlot_' + datetime.now().strftime('%Y-%m-%d'))
+        os.makedirs(folder, exist_ok=True)
+        return folder
+
     def _browse_result_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, 'Select Result Folder', '')
+        start = self.csv_edit.text().strip() or os.path.join(os.path.expanduser('~'), 'Downloads')
+        folder = QFileDialog.getExistingDirectory(self, 'Select Result Folder', start)
         if folder:
             self.csv_edit.setText(folder)
 
@@ -2416,11 +2910,7 @@ class NormalProfileDock(QDockWidget):
     def _save_plot(self):
         if not MATPLOTLIB_AVAILABLE:
             return
-        folder = self.csv_edit.text().strip()
-        if not folder:
-            QMessageBox.warning(self, 'Advanced Profile Tool',
-                'Please set a Result Folder path first.')
-            return
+        folder = self.csv_edit.text().strip() or self._default_output_folder()
         if not os.path.isdir(folder):
             QMessageBox.warning(self, 'Advanced Profile Tool',
                 f'Result folder does not exist:\n{folder}')
@@ -3191,7 +3681,1030 @@ class NormalProfileDock(QDockWidget):
 
         self._do_tight_layout()
         self._sketch_restore(_sketch_save)
+        self._refresh_chainage_cursors()
+        # Sync cut/fill state to any open cross-section dialogs
+        for _xsd in list(self._xs_dialogs):
+            try:
+                _xsd._refresh_cutfill()
+            except Exception:
+                pass
         self.canvas_plot.draw()
+
+
+# ---------------------------------------------------------------------------
+# Cross-section floating dialog
+# ---------------------------------------------------------------------------
+
+class XSectionDialog(QDialog):
+    """Floating cross-section plot at a chainage cursor, perpendicular to the profile."""
+
+    def __init__(self, parent_dock, cursor):
+        super().__init__(parent_dock.iface.mainWindow())
+        self.parent_dock = parent_dock
+        self._canvas     = parent_dock.canvas   # stored at init; safe to use in closeEvent
+        self.cursor      = cursor
+        self.left_m      = 10.0
+        self.right_m     = 10.0
+        self._map_band      = None   # rubber band for the XS line on map canvas
+        self._xs_hover_band = None   # rubber band for moving hover point on map canvas
+        # Sketch state
+        self._xs_sketch_mode       = None
+        self._xs_sketch_objects    = []
+        self._xs_sketch_color      = '#E53935'
+        self._xs_sketch_lw         = 2.0
+        self._xs_sketch_ls         = '-'
+        self._xs_sketch_pressed    = False
+        self._xs_level_snap_art    = None
+        self._xs_sketch_press_data = None
+        self._xs_sketch_current    = None
+        self._xs_sketch_pen_pts    = None
+        self._xs_sketch_drag_info  = None
+        self._xs_sketch_btns       = {}
+        # Cached data for hover interpolation
+        self._xs_dist         = []
+        self._xs_data         = {}
+        self._xs_meta         = {}
+        self._cf1_arr         = None
+        self._cf2_arr         = None
+        self._xs_visible_cols = []   # ordered list of visible data columns (for legend updates)
+        # Hover artists
+        self._cursor_vline = None
+        self._xpos_ann     = None   # X position indicator (top-left, small)
+        self._cf_ann       = None
+
+        self._resample_timer = QTimer(self)
+        self._resample_timer.setSingleShot(True)
+        self._resample_timer.timeout.connect(self._do_resample)
+
+        name = cursor.get('name', 'XS')
+        ch   = cursor['chainage']
+        self.setWindowTitle(f'Cross-Section  {name}   Ch: {ch:.1f} m')
+        self.resize(680, 440)
+        try:
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+        except AttributeError:
+            self.setWindowFlag(Qt.WindowStaysOnTopHint)  # type: ignore
+
+        # Connect finished (fires on both Accept and Reject / X-button close)
+        # as a belt-and-suspenders complement to closeEvent
+        self.finished.connect(self._on_finished)
+
+        self._setup_ui()
+        self._update_map_band()
+        self._do_resample()
+
+    # ------------------------------------------------------------------ UI
+
+    def _setup_ui(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
+
+        hdr = QHBoxLayout()
+        hdr.addWidget(QLabel('Left extent:'))
+        self.left_spin = QDoubleSpinBox()
+        self.left_spin.setRange(0.5, 99999.0)
+        self.left_spin.setValue(self.left_m)
+        self.left_spin.setSuffix(' m')
+        self.left_spin.setDecimals(1)
+        self.left_spin.setFixedWidth(90)
+        self.left_spin.valueChanged.connect(lambda: self._resample_timer.start(400))
+        self.left_spin.editingFinished.connect(self._apply_extent)
+        hdr.addWidget(self.left_spin)
+        hdr.addSpacing(16)
+        hdr.addWidget(QLabel('Right extent:'))
+        self.right_spin = QDoubleSpinBox()
+        self.right_spin.setRange(0.5, 99999.0)
+        self.right_spin.setValue(self.right_m)
+        self.right_spin.setSuffix(' m')
+        self.right_spin.setDecimals(1)
+        self.right_spin.setFixedWidth(90)
+        self.right_spin.valueChanged.connect(lambda: self._resample_timer.start(400))
+        self.right_spin.editingFinished.connect(self._apply_extent)
+        hdr.addWidget(self.right_spin)
+        hdr.addStretch()
+        lbl_hint = QLabel('Press Enter or Tab after typing to apply extent')
+        lbl_hint.setStyleSheet('font-size:9px; color:#90A4AE;')
+        hdr.addWidget(lbl_hint)
+        hdr.addSpacing(12)
+        self._lbl_xy = QLabel('')
+        self._lbl_xy.setMinimumWidth(160)
+        self._lbl_xy.setAlignment(Qt.AlignmentFlag.AlignCenter
+                                   if hasattr(Qt, 'AlignmentFlag')
+                                   else Qt.AlignCenter)  # type: ignore
+        self._lbl_xy.setStyleSheet(
+            'font-family: monospace; font-size: 10px; padding: 1px 6px;'
+            'border: 1px solid #1565C0; border-radius: 3px; color: #1565C0;'
+            'background: white;')
+        self._lbl_xy.setVisible(False)
+        hdr.addWidget(self._lbl_xy)
+        hdr.addSpacing(8)
+        btn_save = QPushButton('Save XS')
+        btn_save.setFixedWidth(70)
+        btn_save.setToolTip('Save cross-section plot as PNG')
+        btn_save.clicked.connect(self._save_png)
+        hdr.addWidget(btn_save)
+        outer.addLayout(hdr)
+
+        # ── Sketch toolbar ────────────────────────────────────────────────
+        if MATPLOTLIB_AVAILABLE:
+            _sk = QHBoxLayout()
+            _sk.setSpacing(3)
+            _sk.setContentsMargins(2, 0, 2, 2)
+            _tool_style = (
+                'QPushButton{font-size:10px;border:1px solid #B0BEC5;'
+                'border-radius:3px;background:#FAFAFA;padding:0 2px;}'
+                'QPushButton:checked{background:#1565C0;color:white;border-color:#1565C0;}'
+                'QPushButton:hover:!checked{background:#E3F2FD;}'
+            )
+            for _mode, _label, _tip in [
+                ('pen',    'Pen',  'Freehand pen — drag'),
+                ('line',   'Line', 'Straight line — drag'),
+                ('arrow',  '→',    'Arrow — drag tail to head'),
+                ('text',   'Text', 'Text annotation — click'),
+                ('level',  '▽',    'Level marker — click to place a horizontal water-level line with inverted triangle'),
+                ('rect',   'Rect', 'Rectangle — drag'),
+                ('circle', '○',    'Ellipse — drag from centre'),
+                ('eraser', '✕',    'Eraser — click or drag'),
+                ('move',   '⇔',    'Move annotation — drag'),
+                ('edit',   '✎',    'Edit — click an annotation to change its colour, thickness or text style'),
+            ]:
+                _sb = QPushButton(_label)
+                _sb.setCheckable(True)
+                _sb.setFixedSize(38, 22)
+                _sb.setToolTip(_tip)
+                _sb.setStyleSheet(_tool_style)
+                _sb.clicked.connect(
+                    lambda chk, m=_mode:
+                    self._xs_sketch_activate(m) if chk else self._xs_sketch_deactivate()
+                )
+                _sk.addWidget(_sb)
+                self._xs_sketch_btns[_mode] = _sb
+
+            _sk.addSpacing(8)
+            _lw = QDoubleSpinBox()
+            _lw.setRange(0.5, 10.0); _lw.setValue(2.0); _lw.setSingleStep(0.5)
+            _lw.setDecimals(1); _lw.setFixedWidth(58)
+            _lw.setToolTip('Line thickness')
+            _lw.valueChanged.connect(lambda v: setattr(self, '_xs_sketch_lw', v))
+            _sk.addWidget(_lw)
+            _lsc = QComboBox()
+            _lsc.addItems(['Solid', 'Dashed', 'Dotted', 'DashDot'])
+            _lsc.setFixedWidth(72)
+            _lsc.setToolTip('Line style')
+            _lsc_map = {'Solid': '-', 'Dashed': '--', 'Dotted': ':', 'DashDot': '-.'}
+            _lsc.currentTextChanged.connect(
+                lambda t: setattr(self, '_xs_sketch_ls', _lsc_map.get(t, '-')))
+            _sk.addWidget(_lsc)
+            _sk.addSpacing(6)
+            for _c in ('#E53935', '#1565C0', '#2E7D32', '#F57F17',
+                       '#6A1B9A', '#00695C', '#212121', '#FFFFFF'):
+                _cb = QPushButton()
+                _cb.setFixedSize(18, 18)
+                _cb.setStyleSheet(
+                    f'background:{_c};border:1px solid #888;border-radius:2px;')
+                _cb.setToolTip(_c)
+                _cb.clicked.connect(
+                    lambda _chk, c=_c: setattr(self, '_xs_sketch_color', c))
+                _sk.addWidget(_cb)
+            _sk.addStretch()
+            _clr = QPushButton('Clear')
+            _clr.setFixedSize(45, 22)
+            _clr.setStyleSheet(
+                'font-size:10px;border:1px solid #EF9A9A;border-radius:3px;'
+                'background:#FFF3F3;color:#C62828;')
+            _clr.clicked.connect(self._xs_sketch_clear)
+            _sk.addWidget(_clr)
+            outer.addLayout(_sk)
+
+        if MATPLOTLIB_AVAILABLE:
+            self.figure    = Figure(figsize=(7, 4))
+            self.ax        = self.figure.add_subplot(111)
+            self.canvas_xs = FigureCanvas(self.figure)
+            self.canvas_xs.mpl_connect('motion_notify_event', self._on_hover)
+            self.canvas_xs.mpl_connect('axes_leave_event',    self._on_leave)
+            self.canvas_xs.mpl_connect('button_press_event',   self._xs_sketch_on_press)
+            self.canvas_xs.mpl_connect('motion_notify_event',  self._xs_sketch_on_motion)
+            self.canvas_xs.mpl_connect('button_release_event', self._xs_sketch_on_release)
+            outer.addWidget(self.canvas_xs, 1)
+        else:
+            outer.addWidget(QLabel('Matplotlib is not available.'))
+
+    # ------------------------------------------------------------------ extent
+
+    def _apply_extent(self):
+        """Immediate apply — called on editingFinished (Enter / Tab)."""
+        self._resample_timer.stop()
+        self.left_m  = self.left_spin.value()
+        self.right_m = self.right_spin.value()
+        self._update_map_band()
+        self._do_resample()
+
+    # ------------------------------------------------------------------ save
+
+    def _save_png(self):
+        if not MATPLOTLIB_AVAILABLE:
+            return
+        name = self.cursor.get('name', 'XS')
+        ch   = self.cursor['chainage']
+        out_folder = self.parent_dock._default_output_folder()
+        default = os.path.join(out_folder, f'{name}_Ch{ch:.0f}.png')
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Save Cross-Section Plot', default,
+            'PNG Image (*.png);;All Files (*)')
+        if path:
+            try:
+                self.figure.savefig(path, dpi=150, bbox_inches='tight')
+            except Exception as e:
+                QMessageBox.warning(self, 'Save Failed', str(e))
+
+    # ------------------------------------------------------------------ map band
+
+    def _update_map_band(self):
+        self._clear_map_band()
+        try:
+            geom = self.parent_dock._make_perp_line_geom(
+                self.cursor['chainage'], self.left_m, self.right_m)
+            if geom is None:
+                return
+            self._map_band = QgsRubberBand(self._canvas, _LINE_GEOM)
+            self._map_band.setColor(QColor(57, 255, 20, 255))
+            self._map_band.setWidth(3)
+            try:
+                self._map_band.setLineStyle(Qt.PenStyle.DashLine)
+            except AttributeError:
+                self._map_band.setLineStyle(Qt.DashLine)  # type: ignore[attr-defined]
+            self._map_band.setToGeometry(geom, None)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _delete_band(band):
+        """Forcefully destroy a QgsRubberBand — removes it from canvas immediately."""
+        if band is None:
+            return
+        try:
+            import sip
+            sip.delete(band)
+            return
+        except Exception:
+            pass
+        # Fallback: reset geometry (makes it invisible) + hide
+        for fn in (lambda: band.reset(), lambda: band.setVisible(False)):
+            try:
+                fn()
+            except Exception:
+                pass
+
+    def _clear_map_band(self):
+        band, self._map_band = self._map_band, None
+        self._delete_band(band)
+
+    def _clear_xs_hover_band(self):
+        band, self._xs_hover_band = self._xs_hover_band, None
+        self._delete_band(band)
+
+    def _on_finished(self, _result=None):
+        """Called when the dialog closes (either X-button or programmatic)."""
+        self._resample_timer.stop()
+        self._clear_map_band()
+        self._clear_xs_hover_band()
+
+    def closeEvent(self, event):
+        self._on_finished()
+        super().closeEvent(event)
+
+    # ------------------------------------------------------------------ resample
+
+    def _do_resample(self):
+        self.left_m  = self.left_spin.value()
+        self.right_m = self.right_spin.value()
+        self._update_map_band()          # keep map canvas line in sync with both spinboxes
+        if not MATPLOTLIB_AVAILABLE:
+            return
+        try:
+            geom = self.parent_dock._make_perp_line_geom(
+                self.cursor['chainage'], self.left_m, self.right_m)
+            if geom is None:
+                return
+            raster_entries, vector_entries, col_meta = \
+                self.parent_dock._collect_entries()
+            if not raster_entries and not vector_entries:
+                self._xs_dist = []; self._xs_data = {}; self._xs_meta = {}
+                self._cf1_arr = None; self._cf2_arr = None
+                self._draw_xs(); return
+            interval = self.parent_dock.interval_spin.value()
+            data, chainages = self.parent_dock._extract(
+                geom, raster_entries, vector_entries, interval)
+            xs_dist = [ch - self.left_m for ch in chainages]
+
+            self._xs_dist = xs_dist
+            self._xs_data = data
+            self._xs_meta = col_meta
+            self._refresh_cutfill()
+        except Exception:
+            pass
+
+    def _refresh_cutfill(self):
+        """Re-evaluate cut/fill arrays from cached data without resampling; redraw."""
+        if not MATPLOTLIB_AVAILABLE:
+            return
+        try:
+            ax_idx = self.cursor.get('ax_idx', 0)
+            cfg = (self.parent_dock._win_cfgs[ax_idx]
+                   if ax_idx < len(self.parent_dock._win_cfgs) else None)
+            cf1, cf2 = None, None
+            data = self._xs_data
+            if (cfg is not None and self.parent_dock._active_tab != 2
+                    and cfg['cutfill_cb'].isChecked()
+                    and cfg['cf_y1'].count() > 0 and cfg['cf_y2'].count() > 0):
+                y1k = cfg['cf_y1'].currentText()
+                y2k = cfg['cf_y2'].currentText()
+                if y1k in data and y2k in data and y1k != y2k:
+                    cf1 = np.array([v if v is not None else np.nan
+                                    for v in data[y1k]], dtype=float)
+                    cf2 = np.array([v if v is not None else np.nan
+                                    for v in data[y2k]], dtype=float)
+            self._cf1_arr = cf1
+            self._cf2_arr = cf2
+            self._draw_xs()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------ draw
+
+    def _draw_xs(self):
+        # Save sketch objects before clearing (they use transData and survive re-add)
+        _saved_sketches = list(self._xs_sketch_objects)
+        self.ax.clear()
+        self._cursor_vline    = None
+        self._xpos_ann        = None
+        self._cf_ann          = None
+        self._xs_visible_cols = []
+
+        xs       = np.array(self._xs_dist, dtype=float) if self._xs_dist else np.array([])
+        data     = self._xs_data
+        col_meta = self._xs_meta
+
+        for col, vals in data.items():
+            meta = col_meta.get(col, {})
+            if not meta.get('visible', True):
+                continue
+            color = meta.get('color', QColor('#2196F3'))
+            if isinstance(color, QColor):
+                color = color.name()
+            ls = meta.get('linestyle', '-')
+            ys = np.array([v if v is not None else np.nan for v in vals], dtype=float)
+            self.ax.plot(xs, ys, label=col, color=color, linewidth=1.5, linestyle=ls)
+            self._xs_visible_cols.append(col)
+
+        # Cut/fill shading
+        cf1, cf2 = self._cf1_arr, self._cf2_arr
+        if cf1 is not None and cf2 is not None and len(xs) == len(cf1):
+            valid = np.isfinite(cf1) & np.isfinite(cf2)
+            self.ax.fill_between(xs, cf1, cf2, where=valid & (cf2 > cf1),
+                                  color='#F44336', alpha=0.20, interpolate=True,
+                                  label='_nolegend_')
+            self.ax.fill_between(xs, cf1, cf2, where=valid & (cf2 < cf1),
+                                  color='#1565C0', alpha=0.20, interpolate=True,
+                                  label='_nolegend_')
+
+        # Centre line
+        self.ax.axvline(x=0, color='#212121', linewidth=0.8, linestyle='-.', alpha=0.7, zorder=5)
+
+        # Left / Right direction labels
+        if len(xs) > 1:
+            import matplotlib.transforms as _mt
+            blend = _mt.blended_transform_factory(self.ax.transData, self.ax.transAxes)
+            self.ax.text(-self.left_m * 0.98, 0.02, '← Left',
+                         transform=blend, fontsize=7.5, color='#546E7A',
+                         ha='left', va='bottom')
+            self.ax.text(self.right_m * 0.98, 0.02, '+ Right →',
+                         transform=blend, fontsize=7.5, color='#546E7A',
+                         ha='right', va='bottom')
+
+        # Single legend (values are embedded during hover via legend text updates)
+        if data:
+            self.ax.legend(fontsize=8, loc='best')
+
+        # Hover cursor (hidden until mouse enters)
+        self._cursor_vline = self.ax.axvline(
+            x=0, color='#D32F2F', linewidth=0.8, linestyle='--', alpha=0.0, zorder=15)
+        self._xpos_ann = None   # not used; (x,y) shown in header label instead
+        # ΔY indicator — top-right, shown on hover when cut/fill active
+        self._cf_ann = self.ax.text(
+            0.98, 0.97, '', transform=self.ax.transAxes,
+            fontsize=8, ha='right', va='top', color='#D32F2F',
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                      alpha=0.88, edgecolor='none'),
+            visible=False, zorder=20)
+
+        name = self.cursor.get('name', 'XS')
+        ch   = self.cursor['chainage']
+        self.ax.set_title(f'{name}   Ch: {ch:.1f} m', fontsize=10, fontweight='bold')
+        self.ax.set_xlabel('Distance from centre  [ − Left  |  + Right ]  [m]', fontsize=9)
+        self.ax.set_ylabel('Elevation / Value', fontsize=9)
+        self.ax.grid(True, alpha=0.3)
+        # Re-attach sketch objects after ax.clear() — all use transData (data coords)
+        # which remains valid after clear since it references the live axes transform.
+        for _obj in _saved_sketches:
+            try:
+                if isinstance(_obj, (_MplRect, _MplEllipse)):
+                    self.ax.add_patch(_obj)
+                else:
+                    self.ax.add_artist(_obj)
+            except Exception:
+                pass
+        self._xs_sketch_objects = _saved_sketches
+
+        try:
+            self.figure.tight_layout()
+        except Exception:
+            pass
+        self.canvas_xs.draw()
+
+    # ------------------------------------------------------------------ hover
+
+    def _on_hover(self, event):
+        # Level tool: update persistent snap indicator (+) in place
+        if self._xs_sketch_mode == 'level':
+            if (self._xs_level_snap_art is not None
+                    and event.inaxes == self.ax and event.xdata is not None):
+                snapped_x, snapped_y, snap_col, snap_type = _snap_level(self.ax, event.xdata, event.ydata)
+                col = snap_col or '#888888'
+                self._xs_level_snap_art.set_data([snapped_x], [snapped_y])
+                if snap_type == 'vertex':
+                    self._xs_level_snap_art.set_marker('s')
+                    self._xs_level_snap_art.set_markersize(8)
+                    self._xs_level_snap_art.set_markerfacecolor('none')
+                else:
+                    self._xs_level_snap_art.set_marker('+')
+                    self._xs_level_snap_art.set_markersize(13)
+                self._xs_level_snap_art.set_markeredgecolor(col)
+                self._xs_level_snap_art.set_alpha(1.0 if snap_col else 0.5)
+                self._xs_level_snap_art.set_visible(True)
+                self.canvas_xs.draw_idle()
+            return
+
+        if self._xs_sketch_mode is not None:   # other sketch modes suppress hover display
+            return
+        if (event.inaxes != self.ax or not self._xs_dist
+                or self._cursor_vline is None or event.xdata is None):
+            return
+        x  = event.xdata
+        xs = np.array(self._xs_dist, dtype=float)
+
+        self._cursor_vline.set_xdata([x, x])
+        self._cursor_vline.set_alpha(0.7)
+
+        # Update top-bar (x, y) label
+        if hasattr(self, '_lbl_xy'):
+            _y_disp = ''
+            if self._xs_visible_cols:
+                _col0 = self._xs_visible_cols[0]
+                _ys0  = np.array(
+                    [v if v is not None else np.nan
+                     for v in self._xs_data.get(_col0, [])], dtype=float)
+                if len(_ys0) == len(xs):
+                    _yv = float(np.interp(x, xs, _ys0))
+                    if np.isfinite(_yv):
+                        _y_disp = f'{_yv:.3f}'
+            _x_disp = f'{x:+.2f}'
+            if _y_disp:
+                self._lbl_xy.setText(f'(x, y) = ({_x_disp}, {_y_disp})')
+            else:
+                self._lbl_xy.setText(f'x = {_x_disp} m')
+            self._lbl_xy.setVisible(True)
+
+        # Update legend entries with interpolated values
+        lgd = self.ax.get_legend()
+        if lgd:
+            texts = lgd.get_texts()
+            for i, col in enumerate(self._xs_visible_cols):
+                if i >= len(texts):
+                    break
+                vals = self._xs_data.get(col, [])
+                ys   = np.array([v if v is not None else np.nan for v in vals], dtype=float)
+                v    = float(np.interp(x, xs, ys))
+                texts[i].set_text(f'{col} [{v:.3f}]' if np.isfinite(v) else col)
+
+        # ΔY in top-right
+        cf1, cf2 = self._cf1_arr, self._cf2_arr
+        if cf1 is not None and cf2 is not None and self._cf_ann is not None:
+            dy = float(np.interp(x, xs, cf2 - cf1))
+            if np.isfinite(dy):
+                self._cf_ann.set_text(f'ΔY: {dy:+.3f} m')
+                self._cf_ann.set_visible(True)
+
+        self.canvas_xs.draw_idle()
+
+        # Move hover point on map canvas along the XS line
+        try:
+            geom = self.parent_dock._make_perp_line_geom(
+                self.cursor['chainage'], self.left_m, self.right_m)
+            if geom is not None:
+                dist_along = max(0.0, self.left_m + x)   # x is signed; left_m + x = offset from left end
+                pt = geom.interpolate(dist_along).asPoint()
+                if self._xs_hover_band is None:
+                    self._xs_hover_band = QgsRubberBand(
+                        self._canvas, _POINT_GEOM)
+                    self._xs_hover_band.setIcon(_ICON_CIRCLE)
+                    self._xs_hover_band.setIconSize(10)
+                    self._xs_hover_band.setColor(QColor(211, 47, 47, 230))
+                    try:
+                        self._xs_hover_band.setFillColor(QColor(211, 47, 47, 180))
+                    except Exception:
+                        pass
+                self._xs_hover_band.reset(_POINT_GEOM)
+                self._xs_hover_band.addPoint(QgsPointXY(pt))
+        except Exception:
+            pass
+
+    def _on_leave(self, event):
+        if self._xs_level_snap_art is not None:
+            self._xs_level_snap_art.set_visible(False)
+        if self._cursor_vline is not None:
+            self._cursor_vline.set_alpha(0.0)
+        if self._cf_ann is not None:
+            self._cf_ann.set_visible(False)
+        if hasattr(self, '_lbl_xy'):
+            self._lbl_xy.setVisible(False)
+        # Reset legend texts to plain column names
+        lgd = self.ax.get_legend()
+        if lgd:
+            texts = lgd.get_texts()
+            for i, col in enumerate(self._xs_visible_cols):
+                if i < len(texts):
+                    texts[i].set_text(col)
+        # Hide hover point on map canvas
+        if self._xs_hover_band is not None:
+            try:
+                self._xs_hover_band.reset(_POINT_GEOM)
+            except Exception:
+                pass
+        self.canvas_xs.draw_idle()
+
+    # ------------------------------------------------------------------ sketch
+
+    def _xs_sketch_activate(self, mode):
+        for m, b in self._xs_sketch_btns.items():
+            if m != mode:
+                b.setChecked(False)
+        self._xs_sketch_mode = mode
+        if mode == 'level':
+            if self._xs_level_snap_art is not None:
+                try: self._xs_level_snap_art.remove()
+                except Exception: pass
+                self._xs_level_snap_art = None
+            if MATPLOTLIB_AVAILABLE and hasattr(self, 'ax'):
+                try:
+                    self._xs_level_snap_art, = self.ax.plot(
+                        [], [], marker='+', markersize=13, markeredgewidth=1.5,
+                        markerfacecolor='none', markeredgecolor='#888888',
+                        linestyle='none', zorder=30, clip_on=False, visible=False)
+                except Exception:
+                    pass
+        try:
+            _cs = Qt.CursorShape
+            _cur = {
+                'move':   _cs.SizeAllCursor,
+                'eraser': _cs.ForbiddenCursor,
+                'edit':   _cs.PointingHandCursor,
+            }.get(mode, _cs.CrossCursor)
+        except AttributeError:
+            _cur = {
+                'move':   Qt.SizeAllCursor,    # type: ignore
+                'eraser': Qt.ForbiddenCursor,  # type: ignore
+                'edit':   Qt.PointingHandCursor,  # type: ignore
+            }.get(mode, Qt.CrossCursor)  # type: ignore
+        self.canvas_xs.setCursor(_cur)
+
+    def _xs_sketch_deactivate(self):
+        for b in self._xs_sketch_btns.values():
+            b.setChecked(False)
+        self._xs_sketch_mode = None
+        self._xs_sketch_pressed = False
+        self._xs_sketch_current = None
+        if self._xs_level_snap_art is not None:
+            try:
+                self._xs_level_snap_art.remove()
+            except Exception:
+                pass
+            self._xs_level_snap_art = None
+            self.canvas_xs.draw_idle()
+        self.canvas_xs.unsetCursor()
+
+    def _xs_sketch_clear(self):
+        for obj in self._xs_sketch_objects:
+            try: obj.remove()
+            except Exception: pass
+        self._xs_sketch_objects = []
+        self.canvas_xs.draw_idle()
+
+    def _xs_sketch_erase_at(self, event):
+        for obj in reversed(self._xs_sketch_objects):
+            try:
+                hit, _ = obj.contains(event)
+            except Exception:
+                hit = False
+            if hit:
+                try: obj.remove()
+                except Exception: pass
+                self._xs_sketch_objects.remove(obj)
+                self.canvas_xs.draw_idle()
+                break
+
+    def _xs_sketch_on_press(self, event):
+        if self._xs_sketch_mode is None or event.button != 1:
+            return
+        if event.inaxes != self.ax or event.xdata is None:
+            return
+        self._xs_sketch_pressed = True
+        fx, fy = event.xdata, event.ydata
+        self._xs_sketch_press_data = (fx, fy)
+        ax = self.ax
+
+        if self._xs_sketch_mode == 'pen':
+            self._xs_sketch_pen_pts = ([fx], [fy])
+            line, = ax.plot([fx], [fy],
+                            color=self._xs_sketch_color, linewidth=self._xs_sketch_lw,
+                            linestyle=self._xs_sketch_ls,
+                            solid_capstyle='round', solid_joinstyle='round', zorder=10)
+            self._xs_sketch_current = (line,)
+            self._xs_sketch_objects.append(line)
+
+        elif self._xs_sketch_mode == 'line':
+            line, = ax.plot([fx, fx], [fy, fy],
+                            color=self._xs_sketch_color, linewidth=self._xs_sketch_lw,
+                            linestyle=self._xs_sketch_ls,
+                            solid_capstyle='round', zorder=10)
+            self._xs_sketch_current = (line,)
+            self._xs_sketch_objects.append(line)
+
+        elif self._xs_sketch_mode == 'arrow':
+            ann = ax.annotate('', xy=(fx, fy), xytext=(fx, fy),
+                              xycoords='data', textcoords='data',
+                              arrowprops=dict(arrowstyle='->',
+                                              color=self._xs_sketch_color,
+                                              lw=self._xs_sketch_lw,
+                                              linestyle=self._xs_sketch_ls),
+                              zorder=10)
+            self._xs_sketch_current = (ann,)
+            self._xs_sketch_objects.append(ann)
+
+        elif self._xs_sketch_mode == 'rect':
+            rect = _MplRect((fx, fy), 0, 0,
+                             linewidth=self._xs_sketch_lw, linestyle=self._xs_sketch_ls,
+                             edgecolor=self._xs_sketch_color, facecolor='none', zorder=10)
+            ax.add_patch(rect)
+            self._xs_sketch_current = (rect, fx, fy)
+            self._xs_sketch_objects.append(rect)
+
+        elif self._xs_sketch_mode == 'circle':
+            ell = _MplEllipse((fx, fy), 0, 0,
+                               linewidth=self._xs_sketch_lw, linestyle=self._xs_sketch_ls,
+                               edgecolor=self._xs_sketch_color, facecolor='none', zorder=10)
+            ax.add_patch(ell)
+            self._xs_sketch_current = (ell, fx, fy)
+            self._xs_sketch_objects.append(ell)
+
+        elif self._xs_sketch_mode == 'level':
+            self._xs_sketch_pressed = False
+            if self._xs_level_snap_art is not None:
+                self._xs_level_snap_art.set_visible(False)
+            snapped_x, snapped_y, snap_col, _ = _snap_level(ax, event.xdata, event.ydata)
+            col = snap_col or self._xs_sketch_color
+            lvl_tri, = ax.plot(
+                [snapped_x], [snapped_y],
+                marker=_get_tri_tip_path(), markersize=14, linestyle='none',
+                markerfacecolor=col, markeredgecolor=col,
+                markeredgewidth=1.0, zorder=11)
+            lvl_ann = ax.annotate(
+                f'{snapped_y:.3f}',
+                xy=(snapped_x, snapped_y), xycoords='data',
+                xytext=(7, 2), textcoords='offset points',
+                fontsize=7, color=col, va='bottom', ha='left',
+                zorder=11, annotation_clip=False,
+                bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                          edgecolor='none', alpha=0.85))
+            self._xs_sketch_objects.append(lvl_tri)
+            self._xs_sketch_objects.append(lvl_ann)
+            self.canvas_xs.draw_idle()
+            return
+
+        elif self._xs_sketch_mode == 'text':
+            self._xs_sketch_pressed = False
+            text, ok = QInputDialog.getText(self, 'Add Annotation', 'Text:')
+            if ok and text.strip():
+                ann = ax.text(fx, fy, text.strip(),
+                              color=self._xs_sketch_color, fontsize=9, fontweight='bold',
+                              zorder=10,
+                              bbox=dict(boxstyle='round,pad=0.25', facecolor='white',
+                                        edgecolor=self._xs_sketch_color, alpha=0.85))
+                self._xs_sketch_objects.append(ann)
+                self.canvas_xs.draw_idle()
+            return
+
+        elif self._xs_sketch_mode == 'eraser':
+            self._xs_sketch_erase_at(event)
+            return
+
+        elif self._xs_sketch_mode == 'move':
+            self._xs_sketch_drag_info = None
+            for obj in reversed(self._xs_sketch_objects):
+                try: hit, _ = obj.contains(event)
+                except Exception: hit = False
+                if not hit:
+                    continue
+                if isinstance(obj, _MplEllipse):
+                    cx, cy = obj.center
+                    self._xs_sketch_drag_info = {'obj': obj, 'type': 'ellipse',
+                                                  'ox': cx - fx, 'oy': cy - fy}
+                elif isinstance(obj, _MplRect):
+                    bx, by = obj.get_xy()
+                    self._xs_sketch_drag_info = {'obj': obj, 'type': 'rect',
+                                                  'ox': bx - fx, 'oy': by - fy}
+                elif hasattr(obj, 'arrow_patch') and obj.arrow_patch is not None:
+                    hx, hy = float(obj.xy[0]), float(obj.xy[1])
+                    tx, ty = obj.get_position()
+                    self._xs_sketch_drag_info = {'obj': obj, 'type': 'arrow',
+                                                  'hox': hx - fx, 'hoy': hy - fy,
+                                                  'tox': tx - fx, 'toy': ty - fy}
+                elif hasattr(obj, 'get_text') and obj.get_text():
+                    px, py = obj.get_position()
+                    self._xs_sketch_drag_info = {'obj': obj, 'type': 'text',
+                                                  'ox': px - fx, 'oy': py - fy}
+                elif hasattr(obj, 'get_xdata'):
+                    self._xs_sketch_drag_info = {'obj': obj, 'type': 'line2d',
+                                                  'x0': list(obj.get_xdata()),
+                                                  'y0': list(obj.get_ydata()),
+                                                  'px': fx, 'py': fy}
+                if self._xs_sketch_drag_info:
+                    break
+            self._xs_sketch_pressed = self._xs_sketch_drag_info is not None
+            return
+
+        elif self._xs_sketch_mode == 'edit':
+            self._xs_sketch_pressed = False
+            _hit_obj = None
+            for obj in reversed(self._xs_sketch_objects):
+                try: hit, _ = obj.contains(event)
+                except Exception: hit = False
+                if hit:
+                    _hit_obj = obj
+                    break
+            if _hit_obj is not None:
+                QTimer.singleShot(0, lambda o=_hit_obj: self._xs_sketch_edit_object(o))
+            return
+
+        self.canvas_xs.draw_idle()
+
+    def _xs_sketch_on_motion(self, event):
+        if not self._xs_sketch_pressed or self._xs_sketch_mode is None:
+            return
+        if event.inaxes != self.ax or event.xdata is None:
+            return
+        fx, fy = event.xdata, event.ydata
+        cur = self._xs_sketch_current
+
+        if self._xs_sketch_mode == 'pen' and cur:
+            line, = cur
+            self._xs_sketch_pen_pts[0].append(fx)
+            self._xs_sketch_pen_pts[1].append(fy)
+            line.set_data(self._xs_sketch_pen_pts[0], self._xs_sketch_pen_pts[1])
+
+        elif self._xs_sketch_mode == 'line' and cur:
+            line, = cur
+            x0, y0 = self._xs_sketch_press_data
+            line.set_data([x0, fx], [y0, fy])
+
+        elif self._xs_sketch_mode == 'arrow' and cur:
+            ann, = cur
+            ann.xy = (fx, fy)
+
+        elif self._xs_sketch_mode == 'rect' and cur:
+            rect, x0, y0 = cur
+            rect.set_xy((min(x0, fx), min(y0, fy)))
+            rect.set_width(abs(fx - x0))
+            rect.set_height(abs(fy - y0))
+
+        elif self._xs_sketch_mode == 'circle' and cur:
+            ell, x0, y0 = cur
+            dx, dy = abs(fx - x0), abs(fy - y0)
+            if event.key == 'shift':
+                dx = dy = max(dx, dy)
+            ell.set_width(2 * dx)
+            ell.set_height(2 * dy)
+
+        elif self._xs_sketch_mode == 'eraser':
+            self._xs_sketch_erase_at(event)
+            return
+
+        elif self._xs_sketch_mode == 'move':
+            d = self._xs_sketch_drag_info
+            if d is None:
+                return
+            obj = d['obj']
+            if d['type'] == 'ellipse':
+                obj.set_center((fx + d['ox'], fy + d['oy']))
+            elif d['type'] == 'rect':
+                obj.set_xy((fx + d['ox'], fy + d['oy']))
+            elif d['type'] == 'arrow':
+                obj.xy = (fx + d['hox'], fy + d['hoy'])
+                obj.set_position((fx + d['tox'], fy + d['toy']))
+            elif d['type'] == 'text':
+                obj.set_position((fx + d['ox'], fy + d['oy']))
+            elif d['type'] == 'line2d':
+                ddx, ddy = fx - d['px'], fy - d['py']
+                obj.set_data([v + ddx for v in d['x0']],
+                             [v + ddy for v in d['y0']])
+
+        self.canvas_xs.draw_idle()
+
+    def _xs_sketch_edit_object(self, obj):
+        """Open a property-editor dialog for an XS sketch object and apply changes."""
+        try:
+            self._xs_sketch_edit_object_impl(obj)
+        except Exception as exc:
+            QMessageBox.critical(self, 'Sketch Edit Error', str(exc))
+
+    def _xs_sketch_edit_object_impl(self, obj):
+        is_text  = (hasattr(obj, 'get_text') and bool(obj.get_text())
+                    and not (hasattr(obj, 'arrow_patch') and obj.arrow_patch is not None))
+        is_arrow = hasattr(obj, 'arrow_patch') and obj.arrow_patch is not None
+        is_line  = hasattr(obj, 'get_xdata')
+        is_patch = isinstance(obj, (_MplRect, _MplEllipse))
+
+        if is_text:
+            cur_color = _to_hex_color(obj.get_color())
+        elif is_arrow:
+            cur_color = _to_hex_color(obj.arrow_patch.get_edgecolor())
+        elif is_line:
+            cur_color = _to_hex_color(obj.get_color())
+        elif is_patch:
+            cur_color = _to_hex_color(obj.get_edgecolor())
+        else:
+            cur_color = '#000000'
+
+        def _cur_lw():
+            if is_arrow: return obj.arrow_patch.get_linewidth()
+            if is_line:  return obj.get_linewidth()
+            if is_patch: return obj.get_linewidth()
+            return 2.0
+
+        def _cur_ls():
+            _norm = {'solid': '-', 'dashed': '--', 'dotted': ':', 'dashdot': '-.'}
+            if is_arrow: raw = obj.arrow_patch.get_linestyle()
+            elif is_line:  raw = obj.get_linestyle()
+            elif is_patch: raw = obj.get_linestyle()
+            else: return '-'
+            return _norm.get(raw, raw)
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Edit Annotation')
+        dlg.setMinimumWidth(260)
+        try:
+            dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+        except AttributeError:
+            dlg.setWindowFlag(Qt.WindowStaysOnTopHint)  # type: ignore
+        root = QVBoxLayout(dlg)
+        root.setSpacing(8)
+        root.setContentsMargins(12, 12, 12, 12)
+
+        _lbl_style = 'font-size:10px; color:#546E7A;'
+
+        color_val = [cur_color]
+        cr = QHBoxLayout()
+        _clbl = QLabel('Colour:'); _clbl.setStyleSheet(_lbl_style)
+        cr.addWidget(_clbl)
+        color_swatch = QPushButton()
+        color_swatch.setFixedSize(50, 22)
+        color_swatch.setStyleSheet(
+            f'background:{cur_color};border:1px solid #888;border-radius:3px;')
+        def _pick():
+            c = QColorDialog.getColor(QColor(color_val[0]), dlg)
+            if c.isValid():
+                color_val[0] = c.name()
+                color_swatch.setStyleSheet(
+                    f'background:{c.name()};border:1px solid #888;border-radius:3px;')
+        color_swatch.clicked.connect(_pick)
+        cr.addWidget(color_swatch); cr.addStretch()
+        root.addLayout(cr)
+
+        lw_spin  = None
+        ls_combo = None
+        if not is_text:
+            lwr = QHBoxLayout()
+            _wlbl = QLabel('Width:'); _wlbl.setStyleSheet(_lbl_style)
+            lwr.addWidget(_wlbl)
+            lw_spin = QDoubleSpinBox()
+            lw_spin.setRange(0.5, 10.0); lw_spin.setSingleStep(0.5)
+            lw_spin.setDecimals(1); lw_spin.setFixedWidth(65)
+            lw_spin.setValue(_cur_lw())
+            lwr.addWidget(lw_spin); lwr.addStretch()
+            root.addLayout(lwr)
+
+            lsr = QHBoxLayout()
+            _slbl = QLabel('Style:'); _slbl.setStyleSheet(_lbl_style)
+            lsr.addWidget(_slbl)
+            ls_combo = QComboBox(); ls_combo.setFixedWidth(130)
+            for _v, _n in [('-',  '─── Solid'), ('--', '-- Dashed'),
+                           (':',  '··· Dotted'), ('-.', '-·- Dash-dot')]:
+                ls_combo.addItem(_n, _v)
+            _cur = _cur_ls()
+            for _i in range(ls_combo.count()):
+                if ls_combo.itemData(_i) == _cur:
+                    ls_combo.setCurrentIndex(_i); break
+            lsr.addWidget(ls_combo); lsr.addStretch()
+            root.addLayout(lsr)
+
+        font_combo = size_spin = bold_cb = italic_cb = None
+        if is_text:
+            fr = QHBoxLayout()
+            _flbl = QLabel('Font:'); _flbl.setStyleSheet(_lbl_style)
+            fr.addWidget(_flbl)
+            font_combo = QComboBox(); font_combo.setFixedWidth(140)
+            for _fn in ['sans-serif', 'serif', 'monospace',
+                        'DejaVu Sans', 'Arial', 'Courier New']:
+                font_combo.addItem(_fn)
+            try:
+                _ff = (obj.get_fontfamily() or ['sans-serif'])[0]
+                _fi = font_combo.findText(_ff)
+                if _fi >= 0: font_combo.setCurrentIndex(_fi)
+            except Exception:
+                pass
+            fr.addWidget(font_combo); fr.addStretch()
+            root.addLayout(fr)
+
+            sr = QHBoxLayout()
+            _szlbl = QLabel('Size:'); _szlbl.setStyleSheet(_lbl_style)
+            sr.addWidget(_szlbl)
+            size_spin = QSpinBox()
+            size_spin.setRange(6, 72); size_spin.setFixedWidth(60)
+            size_spin.setValue(int(obj.get_fontsize()))
+            sr.addWidget(size_spin); sr.addStretch()
+            root.addLayout(sr)
+
+            bir = QHBoxLayout()
+            bold_cb   = QCheckBox('Bold')
+            italic_cb = QCheckBox('Italic')
+            bold_cb.setChecked(str(obj.get_fontweight()) in ('bold', '700', '800', '900'))
+            italic_cb.setChecked(obj.get_fontstyle() == 'italic')
+            bir.addWidget(bold_cb); bir.addWidget(italic_cb); bir.addStretch()
+            root.addLayout(bir)
+
+        sep = QFrame(); sep.setFrameShape(_HLINE); sep.setFrameShadow(_SUNKEN)
+        root.addWidget(sep)
+        btn_row = QHBoxLayout()
+        btn_ok     = QPushButton('OK');     btn_ok.setFixedWidth(70)
+        btn_cancel = QPushButton('Cancel'); btn_cancel.setFixedWidth(70)
+        btn_row.addStretch(); btn_row.addWidget(btn_ok); btn_row.addWidget(btn_cancel)
+        root.addLayout(btn_row)
+        btn_cancel.clicked.connect(dlg.reject)
+
+        def _apply():
+            nc = color_val[0]
+            if is_text:
+                obj.set_color(nc)
+                bp = obj.get_bbox_patch()
+                if bp: bp.set_edgecolor(nc)
+            elif is_arrow:
+                obj.arrow_patch.set_edgecolor(nc)
+                obj.arrow_patch.set_facecolor(nc)
+            elif is_line:
+                obj.set_color(nc)
+            elif is_patch:
+                obj.set_edgecolor(nc)
+            if lw_spin is not None:
+                nlw = lw_spin.value()
+                if is_arrow: obj.arrow_patch.set_linewidth(nlw)
+                elif is_line: obj.set_linewidth(nlw)
+                elif is_patch: obj.set_linewidth(nlw)
+            if ls_combo is not None:
+                nls = ls_combo.currentData()
+                if is_arrow: obj.arrow_patch.set_linestyle(nls)
+                elif is_line: obj.set_linestyle(nls)
+                elif is_patch: obj.set_linestyle(nls)
+            if is_text:
+                if font_combo: obj.set_fontfamily(font_combo.currentText())
+                if size_spin:  obj.set_fontsize(size_spin.value())
+                if bold_cb:    obj.set_fontweight('bold' if bold_cb.isChecked() else 'normal')
+                if italic_cb:  obj.set_fontstyle('italic' if italic_cb.isChecked() else 'normal')
+                bp = obj.get_bbox_patch()
+                if bp: bp.set_edgecolor(nc)
+            self.canvas_xs.draw_idle()
+            dlg.accept()
+
+        btn_ok.clicked.connect(_apply)
+        dlg.raise_()
+        dlg.activateWindow()
+        dlg.exec()
+
+    def _xs_sketch_on_release(self, event):
+        self._xs_sketch_pressed = False
+        self._xs_sketch_current = None
+        self._xs_sketch_pen_pts = None
+        self._xs_sketch_drag_info = None
 
 
 # ---------------------------------------------------------------------------
@@ -3236,8 +4749,23 @@ class FTAProfilePlugin:
 
     def unload(self):
         if self.dock:
+            # Close all open cross-section dialogs and remove their map canvas bands
+            for _dlg in list(getattr(self.dock, '_xs_dialogs', [])):
+                try:
+                    _dlg._clear_map_band()
+                    _dlg._clear_xs_hover_band()
+                except Exception:
+                    pass
+                try:
+                    _dlg.close()
+                except Exception:
+                    pass
             try:
                 self.dock._hover_band.reset(_POINT_GEOM)
+            except Exception:
+                pass
+            try:
+                self.dock._clear_cursor_map_points()
             except Exception:
                 pass
             self.iface.removeDockWidget(self.dock)
