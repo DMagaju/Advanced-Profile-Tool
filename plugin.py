@@ -2533,7 +2533,7 @@ class NormalProfileDock(QDockWidget):
             self._ch_cursor_artists.append([vline, lbl_top, lbl_name])
 
     def _add_cursor_map_point(self, chainage, name=''):
-        """Place a short perpendicular line and name annotation on the map canvas."""
+        """Place a short dashed perpendicular line and name annotation on the map canvas."""
         if self.profile_geom is None:
             self._ch_cursor_map_bands.append(None)
             self._ch_cursor_annotations.append(None)
@@ -2546,41 +2546,54 @@ class NormalProfileDock(QDockWidget):
             band.setColor(QColor(21, 101, 192, 230))
             band.setWidth(2)
             try:
-                band.setLineStyle(Qt.PenStyle.SolidLine)
+                band.setLineStyle(Qt.PenStyle.DashLine)
             except AttributeError:
-                band.setLineStyle(Qt.SolidLine)  # type: ignore[attr-defined]
+                band.setLineStyle(Qt.DashLine)  # type: ignore[attr-defined]
             band.setToGeometry(geom, None)
             self._ch_cursor_map_bands.append(band)
         except Exception:
             self._ch_cursor_map_bands.append(None)
 
-        # Text annotation showing the cursor name
+        # Text label using the modern annotation API (QGIS 3.16+)
         ann = None
         if name and self.profile_geom is not None:
             try:
-                from qgis.core import QgsTextAnnotation
-                from qgis.PyQt.QtGui import QColor as _QColor
+                from qgis.core import (QgsAnnotationPointTextItem,
+                                        QgsTextFormat, QgsTextBufferSettings)
+                from qgis.PyQt.QtGui import QFont, QColor as _QColor
                 pt2 = self.profile_geom.interpolate(chainage).asPoint()
-                ann = QgsTextAnnotation()
-                doc = QTextDocument()
-                # White background, 9pt bold, blue text for legibility
-                doc.setHtml(
-                    f'<span style="font-family:sans-serif;font-size:9pt;'
-                    f'font-weight:bold;color:#1565C0;">{name}</span>'
-                )
-                ann.setDocument(doc)
-                ann.setMapPosition(QgsGeometry.fromPointXY(QgsPointXY(pt2.x(), pt2.y())))
-                ann.setHasFixedMapPosition(True)
-                # Frame: auto-size based on name length; min 60 wide
-                frame_w = max(60.0, len(name) * 8.0)
-                ann.setFrameSize(QSizeF(frame_w, 22))
-                ann.setFrameOffsetFromReferencePoint(QPointF(12, -28))
-                ann.setFrameBackgroundColor(_QColor(255, 255, 255, 220))
-                ann.setFrameBorderWidth(0.8)
-                QgsProject.instance().annotationManager().addAnnotation(ann)
+                item = QgsAnnotationPointTextItem(
+                    name, QgsPointXY(pt2.x(), pt2.y()))
+                fmt = QgsTextFormat()
+                font = QFont('Sans Serif', 9)
+                font.setBold(True)
+                fmt.setFont(font)
+                fmt.setColor(_QColor('#1565C0'))
+                buf = QgsTextBufferSettings()
+                buf.setEnabled(True)
+                buf.setSize(1.5)
+                buf.setColor(_QColor(255, 255, 255))
+                fmt.setBuffer(buf)
+                item.setFormat(fmt)
+                ann_layer = QgsProject.instance().mainAnnotationLayer()
+                item_id = ann_layer.addItem(item)
+                ann = (ann_layer, item_id)
             except Exception:
                 ann = None
         self._ch_cursor_annotations.append(ann)
+
+    @staticmethod
+    def _remove_ann(ann):
+        if ann is None:
+            return
+        try:
+            if isinstance(ann, tuple):        # (QgsAnnotationLayer, item_id)
+                layer, item_id = ann
+                layer.removeItem(item_id)
+            else:                              # legacy QgsTextAnnotation
+                QgsProject.instance().annotationManager().removeAnnotation(ann)
+        except Exception:
+            pass
 
     def _remove_cursor_map_point(self, idx):
         """Remove the map marker and annotation at the given cursor index."""
@@ -2590,10 +2603,7 @@ class NormalProfileDock(QDockWidget):
                 try: self.canvas.scene().removeItem(band)
                 except Exception: pass
         if idx < len(self._ch_cursor_annotations):
-            ann = self._ch_cursor_annotations.pop(idx)
-            if ann is not None:
-                try: QgsProject.instance().annotationManager().removeAnnotation(ann)
-                except Exception: pass
+            self._remove_ann(self._ch_cursor_annotations.pop(idx))
 
     def _clear_cursor_map_points(self):
         """Remove all permanent cursor map markers and annotations."""
@@ -2603,9 +2613,7 @@ class NormalProfileDock(QDockWidget):
                 except Exception: pass
         self._ch_cursor_map_bands = []
         for ann in self._ch_cursor_annotations:
-            if ann is not None:
-                try: QgsProject.instance().annotationManager().removeAnnotation(ann)
-                except Exception: pass
+            self._remove_ann(ann)
         self._ch_cursor_annotations = []
 
     def _sketch_on_press(self, event):
