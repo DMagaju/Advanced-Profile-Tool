@@ -535,6 +535,8 @@ class NormalProfileDock(QDockWidget):
         # Profile state
         self.profile_geom        = None
         self._perm_band          = None
+        self._map_line_width     = 3      # profile map rubber band width (px)
+        self._map_line_opacity   = 255    # 0-255
         self._prev_tool          = None
         self._extracting         = False
         self._cursor_lines       = []     # one axvline per active profile window
@@ -978,6 +980,32 @@ class NormalProfileDock(QDockWidget):
         self.lbl_line = QLabel('Profile line: not drawn')
         self.lbl_line.setStyleSheet('color:gray;font-style:italic;font-size:11px;')
 
+        # Map profile line style (width + opacity)
+        mls = QHBoxLayout()
+        mls.setSpacing(4)
+        mls.addWidget(QLabel('Map line:'))
+        self._map_lw_spin = QDoubleSpinBox()
+        self._map_lw_spin.setRange(0.5, 10.0)
+        self._map_lw_spin.setValue(3.0)
+        self._map_lw_spin.setSingleStep(0.5)
+        self._map_lw_spin.setDecimals(1)
+        self._map_lw_spin.setFixedWidth(60)
+        self._map_lw_spin.setToolTip('Profile line width on map canvas (px)')
+        self._map_lw_spin.valueChanged.connect(self._apply_map_line_style)
+        mls.addWidget(self._map_lw_spin)
+        mls.addWidget(QLabel('px'))
+        mls.addSpacing(8)
+        mls.addWidget(QLabel('Opacity:'))
+        self._map_op_spin = QSpinBox()
+        self._map_op_spin.setRange(5, 100)
+        self._map_op_spin.setValue(100)
+        self._map_op_spin.setSuffix('%')
+        self._map_op_spin.setFixedWidth(60)
+        self._map_op_spin.setToolTip('Profile line opacity on map canvas')
+        self._map_op_spin.valueChanged.connect(self._apply_map_line_style)
+        mls.addWidget(self._map_op_spin)
+        mls.addStretch()
+
         # ---- Sampling interval (OUTSIDE scroll — always visible) ----------
         iv = QHBoxLayout()
         iv.addWidget(QLabel('Sampling Interval:'))
@@ -992,6 +1020,7 @@ class NormalProfileDock(QDockWidget):
         # ---- Always-visible draw controls (outside scroll) ---------------
         outer.addLayout(dr)
         outer.addWidget(self.lbl_line)
+        outer.addLayout(mls)
         outer.addLayout(iv)
 
         # ---- Fixed bottom section ----------------------------------------
@@ -1505,8 +1534,8 @@ class NormalProfileDock(QDockWidget):
         if self._perm_band:
             self.canvas.scene().removeItem(self._perm_band)
         self._perm_band = QgsRubberBand(self.canvas, _LINE_GEOM)
-        self._perm_band.setColor(QColor(57, 255, 20, 255))
-        self._perm_band.setWidth(3)
+        self._perm_band.setColor(QColor(57, 255, 20, self._map_line_opacity))
+        self._perm_band.setWidth(int(round(self._map_line_width)))
         try:
             self._perm_band.setLineStyle(Qt.PenStyle.SolidLine)
         except AttributeError:
@@ -1517,6 +1546,15 @@ class NormalProfileDock(QDockWidget):
         self.btn_draw.setChecked(False)
         self._toggle_digitizing(False)
         self._on_live_update(geom)  # live for both Raster and Vector tabs
+
+    def _apply_map_line_style(self):
+        """Apply width/opacity spinbox values to the profile rubber band."""
+        self._map_line_width   = self._map_lw_spin.value()
+        self._map_line_opacity = int(self._map_op_spin.value() * 255 / 100)
+        if self._perm_band:
+            self._perm_band.setColor(QColor(57, 255, 20, self._map_line_opacity))
+            self._perm_band.setWidth(int(round(self._map_line_width)))
+            self.canvas.refresh()
 
     def _clear_line(self):
         self.profile_geom        = None
@@ -2482,15 +2520,24 @@ class NormalProfileDock(QDockWidget):
         if name and self.profile_geom is not None:
             try:
                 from qgis.core import QgsTextAnnotation
+                from qgis.PyQt.QtGui import QColor as _QColor
                 pt2 = self.profile_geom.interpolate(chainage).asPoint()
                 ann = QgsTextAnnotation()
                 doc = QTextDocument()
-                doc.setPlainText(name)
+                # White background, 9pt bold, blue text for legibility
+                doc.setHtml(
+                    f'<span style="font-family:sans-serif;font-size:9pt;'
+                    f'font-weight:bold;color:#1565C0;">{name}</span>'
+                )
                 ann.setDocument(doc)
                 ann.setMapPosition(QgsGeometry.fromPointXY(QgsPointXY(pt2.x(), pt2.y())))
                 ann.setHasFixedMapPosition(True)
-                ann.setFrameSize(QSizeF(52, 18))
-                ann.setFrameOffsetFromReferencePoint(QPointF(10, -22))
+                # Frame: auto-size based on name length; min 60 wide
+                frame_w = max(60.0, len(name) * 8.0)
+                ann.setFrameSize(QSizeF(frame_w, 22))
+                ann.setFrameOffsetFromReferencePoint(QPointF(12, -28))
+                ann.setFrameBackgroundColor(_QColor(255, 255, 255, 220))
+                ann.setFrameBorderWidth(0.8)
                 QgsProject.instance().annotationManager().addAnnotation(ann)
             except Exception:
                 ann = None
@@ -3796,7 +3843,9 @@ class XSectionDialog(QDialog):
         self.cursor      = cursor
         self.left_m      = 10.0
         self.right_m     = 10.0
-        self._map_band      = None   # rubber band for the XS line on map canvas
+        self._map_band          = None   # rubber band for the XS line on map canvas
+        self._xs_map_line_width   = 3
+        self._xs_map_line_opacity = 255
         self._xs_hover_band = None   # rubber band for moving hover point on map canvas
         # Sketch state
         self._xs_sketch_mode       = None
@@ -3899,6 +3948,34 @@ class XSectionDialog(QDialog):
         btn_save.clicked.connect(self._save_png)
         hdr.addWidget(btn_save)
         outer.addLayout(hdr)
+
+        # ── Map XS line style ──────────────────────────────────────────────
+        _mxs = QHBoxLayout()
+        _mxs.setSpacing(4)
+        _mxs.setContentsMargins(2, 0, 2, 0)
+        _mxs.addWidget(QLabel('Map XS line:'))
+        self._xs_lw_spin = QDoubleSpinBox()
+        self._xs_lw_spin.setRange(0.5, 10.0)
+        self._xs_lw_spin.setValue(3.0)
+        self._xs_lw_spin.setSingleStep(0.5)
+        self._xs_lw_spin.setDecimals(1)
+        self._xs_lw_spin.setFixedWidth(58)
+        self._xs_lw_spin.setToolTip('XS rubber band width on map canvas (px)')
+        self._xs_lw_spin.valueChanged.connect(self._apply_xs_map_line_style)
+        _mxs.addWidget(self._xs_lw_spin)
+        _mxs.addWidget(QLabel('px'))
+        _mxs.addSpacing(8)
+        _mxs.addWidget(QLabel('Opacity:'))
+        self._xs_op_spin = QSpinBox()
+        self._xs_op_spin.setRange(5, 100)
+        self._xs_op_spin.setValue(100)
+        self._xs_op_spin.setSuffix('%')
+        self._xs_op_spin.setFixedWidth(60)
+        self._xs_op_spin.setToolTip('XS rubber band opacity on map canvas')
+        self._xs_op_spin.valueChanged.connect(self._apply_xs_map_line_style)
+        _mxs.addWidget(self._xs_op_spin)
+        _mxs.addStretch()
+        outer.addLayout(_mxs)
 
         # ── Sketch toolbar ────────────────────────────────────────────────
         if MATPLOTLIB_AVAILABLE:
@@ -4016,6 +4093,15 @@ class XSectionDialog(QDialog):
 
     # ------------------------------------------------------------------ map band
 
+    def _apply_xs_map_line_style(self):
+        """Apply width/opacity spinbox values to the XS rubber band."""
+        self._xs_map_line_width   = self._xs_lw_spin.value()
+        self._xs_map_line_opacity = int(self._xs_op_spin.value() * 255 / 100)
+        if self._map_band:
+            self._map_band.setColor(QColor(57, 255, 20, self._xs_map_line_opacity))
+            self._map_band.setWidth(int(round(self._xs_map_line_width)))
+            self._canvas.refresh()
+
     def _update_map_band(self):
         self._clear_map_band()
         try:
@@ -4024,8 +4110,8 @@ class XSectionDialog(QDialog):
             if geom is None:
                 return
             self._map_band = QgsRubberBand(self._canvas, _LINE_GEOM)
-            self._map_band.setColor(QColor(57, 255, 20, 255))
-            self._map_band.setWidth(3)
+            self._map_band.setColor(QColor(57, 255, 20, self._xs_map_line_opacity))
+            self._map_band.setWidth(int(round(self._xs_map_line_width)))
             try:
                 self._map_band.setLineStyle(Qt.PenStyle.DashLine)
             except AttributeError:
