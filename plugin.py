@@ -4274,6 +4274,12 @@ class XSectionDialog(QDialog):
         if not MATPLOTLIB_AVAILABLE:
             return
         try:
+            # Refresh style meta (linewidth, alpha, linestyle) without re-extracting data
+            try:
+                _, _, col_meta = self.parent_dock._collect_entries()
+                self._xs_meta = col_meta
+            except Exception:
+                pass
             ax_idx = self.cursor.get('ax_idx', 0)
             cfg = (self.parent_dock._win_cfgs[ax_idx]
                    if ax_idx < len(self.parent_dock._win_cfgs) else None)
