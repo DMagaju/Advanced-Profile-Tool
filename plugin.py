@@ -2533,22 +2533,23 @@ class NormalProfileDock(QDockWidget):
             self._ch_cursor_artists.append([vline, lbl_top, lbl_name])
 
     def _add_cursor_map_point(self, chainage, name=''):
-        """Place a filled blue circle marker and name annotation on the map canvas."""
+        """Place a short perpendicular line and name annotation on the map canvas."""
         if self.profile_geom is None:
             self._ch_cursor_map_bands.append(None)
             self._ch_cursor_annotations.append(None)
             return
         try:
-            pt = self.profile_geom.interpolate(chainage).asPoint()
-            band = QgsRubberBand(self.canvas, _POINT_GEOM)
-            band.setIcon(_ICON_CIRCLE)
-            band.setIconSize(12)
+            geom = self._make_perp_line_geom(chainage, 10.0, 10.0)
+            if geom is None:
+                raise ValueError('no perp geom')
+            band = QgsRubberBand(self.canvas, _LINE_GEOM)
             band.setColor(QColor(21, 101, 192, 230))
+            band.setWidth(2)
             try:
-                band.setFillColor(QColor(21, 101, 192, 200))
-            except Exception:
-                band.setIcon(_ICON_X)
-            band.addPoint(QgsPointXY(pt))
+                band.setLineStyle(Qt.PenStyle.SolidLine)
+            except AttributeError:
+                band.setLineStyle(Qt.SolidLine)  # type: ignore[attr-defined]
+            band.setToGeometry(geom, None)
             self._ch_cursor_map_bands.append(band)
         except Exception:
             self._ch_cursor_map_bands.append(None)
