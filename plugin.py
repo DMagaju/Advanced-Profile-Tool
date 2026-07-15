@@ -2533,13 +2533,16 @@ class NormalProfileDock(QDockWidget):
             self._ch_cursor_artists.append([vline, lbl_top, lbl_name])
 
     def _add_cursor_map_point(self, chainage, name=''):
-        """Place a short dashed perpendicular line and name annotation on the map canvas."""
+        """Place a short dashed perpendicular line and name at its right end."""
         if self.profile_geom is None:
             self._ch_cursor_map_bands.append(None)
             self._ch_cursor_annotations.append(None)
             return
+
+        # Build perpendicular geometry — reuse right endpoint for the label
+        geom = self._make_perp_line_geom(chainage, 10.0, 10.0)
+        r_pt = None
         try:
-            geom = self._make_perp_line_geom(chainage, 10.0, 10.0)
             if geom is None:
                 raise ValueError('no perp geom')
             band = QgsRubberBand(self.canvas, _LINE_GEOM)
@@ -2551,21 +2554,21 @@ class NormalProfileDock(QDockWidget):
                 band.setLineStyle(Qt.DashLine)  # type: ignore[attr-defined]
             band.setToGeometry(geom, None)
             self._ch_cursor_map_bands.append(band)
+            pts = geom.asPolyline()          # [l_pt, r_pt]
+            r_pt = pts[-1] if pts else None  # right end of the perp line
         except Exception:
             self._ch_cursor_map_bands.append(None)
 
-        # Text label using the modern annotation API (QGIS 3.16+)
+        # Text label at the right end of the perpendicular line
         ann = None
-        if name and self.profile_geom is not None:
+        if name and r_pt is not None:
             try:
                 from qgis.core import (QgsAnnotationPointTextItem,
                                         QgsTextFormat, QgsTextBufferSettings)
                 from qgis.PyQt.QtGui import QFont, QColor as _QColor
-                pt2 = self.profile_geom.interpolate(chainage).asPoint()
-                item = QgsAnnotationPointTextItem(
-                    name, QgsPointXY(pt2.x(), pt2.y()))
+                item = QgsAnnotationPointTextItem(name, r_pt)
                 fmt = QgsTextFormat()
-                font = QFont('Sans Serif', 9)
+                font = QFont('Sans Serif', 8)
                 font.setBold(True)
                 fmt.setFont(font)
                 fmt.setColor(_QColor('#1565C0'))
