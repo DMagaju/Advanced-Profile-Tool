@@ -660,14 +660,28 @@ class NormalProfileDock(QDockWidget):
         c_btn = _color_btn(hex_c)
         c_btn.clicked.connect(lambda: self._pick_raster_color(row))
 
+        lw_spin = QDoubleSpinBox()
+        lw_spin.setRange(0.5, 5.0); lw_spin.setValue(1.5); lw_spin.setSingleStep(0.5)
+        lw_spin.setDecimals(1); lw_spin.setFixedWidth(48)
+        lw_spin.setToolTip('Line width')
+        lw_spin.valueChanged.connect(self._refresh_plot)
+
+        al_spin = QSpinBox()
+        al_spin.setRange(10, 100); al_spin.setValue(100); al_spin.setSuffix('%')
+        al_spin.setFixedWidth(52)
+        al_spin.setToolTip('Opacity')
+        al_spin.valueChanged.connect(self._refresh_plot)
+
         rm = _rm_btn('Remove raster layer')
         rm.clicked.connect(lambda: self._remove_raster_row(row))
 
         fl.addWidget(tog); fl.addWidget(badge); fl.addWidget(lc, 1)
-        fl.addWidget(ls_combo); fl.addWidget(c_btn); fl.addWidget(rm)
+        fl.addWidget(ls_combo); fl.addWidget(lw_spin); fl.addWidget(al_spin)
+        fl.addWidget(c_btn); fl.addWidget(rm)
 
         row.update({'widget': frame, 'toggle': tog,
-                    'layer_combo': lc, 'ls_combo': ls_combo, 'color_btn': c_btn})
+                    'layer_combo': lc, 'ls_combo': ls_combo, 'color_btn': c_btn,
+                    'lw_spin': lw_spin, 'al_spin': al_spin})
         self._raster_layout.insertWidget(self._raster_layout.count() - 1, frame)
         self._raster_rows.append(row)
 
@@ -1409,6 +1423,8 @@ class NormalProfileDock(QDockWidget):
                     'color':     row['color'],
                     'visible':   row['toggle'].isChecked(),
                     'linestyle': row['ls_combo'].currentData(),
+                    'linewidth': row['lw_spin'].value() if 'lw_spin' in row else 1.5,
+                    'alpha':     row['al_spin'].value() / 100.0 if 'al_spin' in row else 1.0,
                 }
         else:
             # Vector tab: only vector rows
@@ -1427,6 +1443,8 @@ class NormalProfileDock(QDockWidget):
                         'color':     zf['color'],
                         'visible':   zf['toggle'].isChecked(),
                         'linestyle': zf['ls_combo'].currentData() if 'ls_combo' in zf else '-',
+                        'linewidth': zf['lw_spin'].value() if 'lw_spin' in zf else 1.5,
+                        'alpha':     zf['al_spin'].value() / 100.0 if 'al_spin' in zf else 1.0,
                     }
 
         return raster_entries, vector_entries, col_meta
@@ -1440,6 +1458,8 @@ class NormalProfileDock(QDockWidget):
                         'color':     row['color'],
                         'visible':   row['toggle'].isChecked(),
                         'linestyle': row['ls_combo'].currentData(),
+                        'linewidth': row['lw_spin'].value() if 'lw_spin' in row else 1.5,
+                        'alpha':     row['al_spin'].value() / 100.0 if 'al_spin' in row else 1.0,
                     }
         else:
             for vec in self._vector_rows:
@@ -1449,6 +1469,8 @@ class NormalProfileDock(QDockWidget):
                             'color':     zf['color'],
                             'visible':   zf['toggle'].isChecked(),
                             'linestyle': zf['ls_combo'].currentData() if 'ls_combo' in zf else '-',
+                            'linewidth': zf['lw_spin'].value() if 'lw_spin' in zf else 1.5,
+                            'alpha':     zf['al_spin'].value() / 100.0 if 'al_spin' in zf else 1.0,
                         }
         return meta
 
@@ -2943,14 +2965,29 @@ class NormalProfileDock(QDockWidget):
         ls_combo.wheelEvent = lambda e: e.ignore()
         c_btn = _color_btn(hex_c)
         c_btn.clicked.connect(lambda: self._pick_zfield_color(vec, zf))
+
+        _lw = QDoubleSpinBox()
+        _lw.setRange(0.5, 5.0); _lw.setValue(1.5); _lw.setSingleStep(0.5)
+        _lw.setDecimals(1); _lw.setFixedWidth(48)
+        _lw.setToolTip('Line width')
+        _lw.valueChanged.connect(self._refresh_plot)
+
+        _al = QSpinBox()
+        _al.setRange(10, 100); _al.setValue(100); _al.setSuffix('%')
+        _al.setFixedWidth(52)
+        _al.setToolTip('Opacity')
+        _al.valueChanged.connect(self._refresh_plot)
+
         r_btn = QPushButton('−'); r_btn.setFixedSize(22, 22)
         r_btn.setStyleSheet('color:#E53935;font-weight:bold;font-size:16px;')
         r_btn.clicked.connect(lambda: self._remove_zfield_row(vec, zf))
         h.addWidget(tog); h.addWidget(badge)
         h.addWidget(QLabel('Z:')); h.addWidget(fc, 1)
-        h.addWidget(ls_combo); h.addWidget(c_btn); h.addWidget(r_btn)
+        h.addWidget(ls_combo); h.addWidget(_lw); h.addWidget(_al)
+        h.addWidget(c_btn); h.addWidget(r_btn)
         zf.update({'widget': w, 'toggle': tog, 'combo': fc,
-                   'ls_combo': ls_combo, 'color_btn': c_btn})
+                   'ls_combo': ls_combo, 'color_btn': c_btn,
+                   'lw_spin': _lw, 'al_spin': _al})
         layout = vec['zf_layout']
         layout.insertWidget(layout.count() - 1, w)
         vec['z_fields'].append(zf)
@@ -3690,9 +3727,11 @@ class NormalProfileDock(QDockWidget):
                     continue
                 color = meta.get('color', QColor('#2196F3'))
                 ls    = meta.get('linestyle', '-')
+                lw    = meta.get('linewidth', 1.5)
+                alpha = meta.get('alpha', 1.0)
                 ys    = np.array([v if v is not None else np.nan for v in vals], dtype=float)
                 ax_j.plot(xs, ys, label=_prune_mid(col), color=color.name(),
-                          linewidth=1.5, linestyle=ls)
+                          linewidth=lw, linestyle=ls, alpha=alpha)
                 self._plot_cols_per_ax.setdefault(j, []).append(col)
             ax_j.legend(fontsize=8, loc='best')
 
@@ -4235,9 +4274,11 @@ class XSectionDialog(QDialog):
             color = meta.get('color', QColor('#2196F3'))
             if isinstance(color, QColor):
                 color = color.name()
-            ls = meta.get('linestyle', '-')
+            ls    = meta.get('linestyle', '-')
+            lw    = meta.get('linewidth', 1.5)
+            alpha = meta.get('alpha', 1.0)
             ys = np.array([v if v is not None else np.nan for v in vals], dtype=float)
-            self.ax.plot(xs, ys, label=col, color=color, linewidth=1.5, linestyle=ls)
+            self.ax.plot(xs, ys, label=col, color=color, linewidth=lw, linestyle=ls, alpha=alpha)
             self._xs_visible_cols.append(col)
 
         # Cut/fill shading
