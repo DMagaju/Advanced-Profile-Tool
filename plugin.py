@@ -3951,10 +3951,6 @@ class XSectionDialog(QDialog):
         ch   = cursor['chainage']
         self.setWindowTitle(f'Cross-Section  {name}   Ch: {ch:.1f} m')
         self.resize(680, 440)
-        try:
-            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
-        except AttributeError:
-            self.setWindowFlag(Qt.WindowStaysOnTopHint)  # type: ignore
 
         # Connect finished (fires on both Accept and Reject / X-button close)
         # as a belt-and-suspenders complement to closeEvent
