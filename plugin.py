@@ -2568,7 +2568,7 @@ class NormalProfileDock(QDockWidget):
                 from qgis.PyQt.QtGui import QFont, QColor as _QColor
                 item = QgsAnnotationPointTextItem(name, r_pt)
                 fmt = QgsTextFormat()
-                font = QFont('Sans Serif', 8)
+                font = QFont('Sans Serif', 7)
                 font.setBold(True)
                 fmt.setFont(font)
                 fmt.setColor(_QColor('#1565C0'))
