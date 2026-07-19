@@ -3937,11 +3937,16 @@ class XSectionDialog(QDialog):
         self._xs_meta         = {}
         self._cf1_arr         = None
         self._cf2_arr         = None
-        self._xs_visible_cols = []   # ordered list of visible data columns (for legend updates)
+        self._xs_visible_cols    = []   # visible cols in window 0 (for hover)
+        self._xs_vcols_per_win   = []   # visible cols per window
+        self._xs_extra_axes      = []   # extra XS axes (mirrors profile _extra_axes)
         # Hover artists
-        self._cursor_vline = None
-        self._xpos_ann     = None   # X position indicator (top-left, small)
-        self._cf_ann       = None
+        self._cursor_vline  = None        # single compat ref (= _cursor_vlines[0])
+        self._cursor_vlines = []          # one per axis
+        self._xpos_ann      = None
+        self._cf_ann        = None        # compat ref (= _cf_anns[0])
+        self._cf_anns       = []          # one per axis
+        self._cf_pairs      = []          # [(cf1, cf2), ...] per window
 
         self._resample_timer = QTimer(self)
         self._resample_timer.setSingleShot(True)
@@ -4266,7 +4271,7 @@ class XSectionDialog(QDialog):
             pass
 
     def _refresh_cutfill(self):
-        """Re-evaluate cut/fill arrays from cached data without resampling; redraw."""
+        """Re-evaluate cut/fill for all active windows, refresh meta, redraw."""
         if not MATPLOTLIB_AVAILABLE:
             return
         try:
@@ -4276,105 +4281,158 @@ class XSectionDialog(QDialog):
                 self._xs_meta = col_meta
             except Exception:
                 pass
-            ax_idx = self.cursor.get('ax_idx', 0)
-            cfg = (self.parent_dock._win_cfgs[ax_idx]
-                   if ax_idx < len(self.parent_dock._win_cfgs) else None)
-            cf1, cf2 = None, None
-            data = self._xs_data
-            if (cfg is not None and self.parent_dock._active_tab != 2
-                    and cfg['cutfill_cb'].isChecked()
-                    and cfg['cf_y1'].count() > 0 and cfg['cf_y2'].count() > 0):
-                y1k = cfg['cf_y1'].currentText()
-                y2k = cfg['cf_y2'].currentText()
-                if y1k in data and y2k in data and y1k != y2k:
-                    cf1 = np.array([v if v is not None else np.nan
-                                    for v in data[y1k]], dtype=float)
-                    cf2 = np.array([v if v is not None else np.nan
-                                    for v in data[y2k]], dtype=float)
-            self._cf1_arr = cf1
-            self._cf2_arr = cf2
+            pdock    = self.parent_dock
+            data     = self._xs_data
+            n_wins   = pdock._n_active_wins()
+            cf_pairs = []
+            for j in range(n_wins):
+                cfg = pdock._win_cfgs[j] if j < len(pdock._win_cfgs) else None
+                cf1, cf2 = None, None
+                if (cfg is not None and pdock._active_tab != 2
+                        and cfg['cutfill_cb'].isChecked()
+                        and cfg['cf_y1'].count() > 0 and cfg['cf_y2'].count() > 0):
+                    y1k = cfg['cf_y1'].currentText()
+                    y2k = cfg['cf_y2'].currentText()
+                    if y1k in data and y2k in data and y1k != y2k:
+                        cf1 = np.array([v if v is not None else np.nan
+                                        for v in data[y1k]], dtype=float)
+                        cf2 = np.array([v if v is not None else np.nan
+                                        for v in data[y2k]], dtype=float)
+                cf_pairs.append((cf1, cf2))
+            self._cf_pairs  = cf_pairs
+            # Backward-compat single refs (window 0)
+            self._cf1_arr, self._cf2_arr = cf_pairs[0] if cf_pairs else (None, None)
             self._draw_xs()
         except Exception:
             pass
 
     # ------------------------------------------------------------------ draw
 
+    def _rebuild_xs_figure(self, n_wins):
+        """Rebuild the XS figure with n_wins stacked subplots sharing the x-axis."""
+        self.figure.clear()
+        if n_wins == 1:
+            self.ax = self.figure.add_subplot(111)
+            self._xs_extra_axes = []
+        else:
+            gs = self.figure.add_gridspec(n_wins, 1, hspace=0.40)
+            self.ax = self.figure.add_subplot(gs[0])
+            self._xs_extra_axes = [
+                self.figure.add_subplot(gs[i], sharex=self.ax)
+                for i in range(1, n_wins)
+            ]
+        self._cursor_vlines     = []
+        self._cf_anns           = []
+        self._xs_level_snap_art = None   # recreated by level tool on next activation
+
     def _draw_xs(self):
-        # Save sketch objects before clearing (they use transData and survive re-add)
-        _saved_sketches = list(self._xs_sketch_objects)
-        self.ax.clear()
-        self._cursor_vline    = None
+        pdock  = self.parent_dock
+        n_wins = pdock._n_active_wins()
+
+        # Rebuild axes if window count changed
+        all_xs = [self.ax] + self._xs_extra_axes
+        if n_wins != len(all_xs):
+            _saved_sketches = list(self._xs_sketch_objects)
+            self._rebuild_xs_figure(n_wins)
+        else:
+            _saved_sketches = list(self._xs_sketch_objects)
+
+        all_xs = [self.ax] + self._xs_extra_axes
+
+        # Clear all axes
+        for _ax in all_xs:
+            _ax.clear()
+
+        self._cursor_vlines   = []
+        self._cf_anns         = []
         self._xpos_ann        = None
-        self._cf_ann          = None
-        self._xs_visible_cols = []
+        self._xs_vcols_per_win = [[] for _ in range(n_wins)]
 
         xs       = np.array(self._xs_dist, dtype=float) if self._xs_dist else np.array([])
         data     = self._xs_data
         col_meta = self._xs_meta
+        import matplotlib.transforms as _mt
 
-        for col, vals in data.items():
-            meta = col_meta.get(col, {})
-            if not meta.get('visible', True):
-                continue
-            color = meta.get('color', QColor('#2196F3'))
-            if isinstance(color, QColor):
-                color = color.name()
-            ls    = meta.get('linestyle', '-')
-            lw    = meta.get('linewidth', 1.5)
-            alpha = meta.get('alpha', 1.0)
-            ys = np.array([v if v is not None else np.nan for v in vals], dtype=float)
-            self.ax.plot(xs, ys, label=col, color=color, linewidth=lw, linestyle=ls, alpha=alpha)
-            self._xs_visible_cols.append(col)
+        for j, ax_j in enumerate(all_xs):
+            cfg_j     = pdock._win_cfgs[j] if j < len(pdock._win_cfgs) else None
+            win_cols  = set(cfg_j['col_combo'].checked_cols()) if cfg_j else set()
+            win_label = cfg_j['name_edit'].text().strip() if cfg_j else ''
 
-        # Cut/fill shading
-        cf1, cf2 = self._cf1_arr, self._cf2_arr
-        if cf1 is not None and cf2 is not None and len(xs) == len(cf1):
-            valid = np.isfinite(cf1) & np.isfinite(cf2)
-            self.ax.fill_between(xs, cf1, cf2, where=valid & (cf2 > cf1),
-                                  color='#F44336', alpha=0.20, interpolate=True,
-                                  label='_nolegend_')
-            self.ax.fill_between(xs, cf1, cf2, where=valid & (cf2 < cf1),
-                                  color='#1565C0', alpha=0.20, interpolate=True,
-                                  label='_nolegend_')
+            vis_cols_j = []
+            for col, vals in data.items():
+                if win_cols and col not in win_cols:
+                    continue
+                meta = col_meta.get(col, {})
+                if not meta.get('visible', True):
+                    continue
+                color = meta.get('color', QColor('#2196F3'))
+                if isinstance(color, QColor):
+                    color = color.name()
+                ls    = meta.get('linestyle', '-')
+                lw    = meta.get('linewidth', 1.5)
+                alpha = meta.get('alpha', 1.0)
+                ys = np.array([v if v is not None else np.nan for v in vals], dtype=float)
+                ax_j.plot(xs, ys, label=col, color=color, linewidth=lw, linestyle=ls, alpha=alpha)
+                vis_cols_j.append(col)
+            self._xs_vcols_per_win[j] = vis_cols_j
 
-        # Centre line
-        self.ax.axvline(x=0, color='#212121', linewidth=0.8, linestyle='-.', alpha=0.7, zorder=5)
+            # Cut/fill shading for this window
+            if j < len(self._cf_pairs):
+                cf1, cf2 = self._cf_pairs[j]
+                if cf1 is not None and cf2 is not None and len(xs) == len(cf1):
+                    valid = np.isfinite(cf1) & np.isfinite(cf2)
+                    ax_j.fill_between(xs, cf1, cf2, where=valid & (cf2 > cf1),
+                                      color='#F44336', alpha=0.20, interpolate=True,
+                                      label='_nolegend_')
+                    ax_j.fill_between(xs, cf1, cf2, where=valid & (cf2 < cf1),
+                                      color='#1565C0', alpha=0.20, interpolate=True,
+                                      label='_nolegend_')
 
-        # Left / Right direction labels
+            # Centre line
+            ax_j.axvline(x=0, color='#212121', linewidth=0.8, linestyle='-.', alpha=0.7, zorder=5)
+
+            ax_j.set_ylabel(win_label or 'Z value', fontsize=9)
+            ax_j.grid(True, alpha=0.3)
+            if vis_cols_j:
+                ax_j.legend(fontsize=8, loc='best')
+
+            # Hover cursor vline (hidden until mouse enters)
+            vl = ax_j.axvline(x=0, color='#D32F2F', linewidth=0.8,
+                               linestyle='--', alpha=0.0, zorder=15)
+            self._cursor_vlines.append(vl)
+
+            # ΔY annotation per axis
+            cf_ann = ax_j.text(
+                0.98, 0.97, '', transform=ax_j.transAxes,
+                fontsize=8, ha='right', va='top', color='#D32F2F',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                          alpha=0.88, edgecolor='none'),
+                visible=False, zorder=20)
+            self._cf_anns.append(cf_ann)
+
+        # Left / Right direction labels on bottom axis only
         if len(xs) > 1:
-            import matplotlib.transforms as _mt
-            blend = _mt.blended_transform_factory(self.ax.transData, self.ax.transAxes)
-            self.ax.text(-self.left_m * 0.98, 0.02, '← Left',
-                         transform=blend, fontsize=7.5, color='#546E7A',
-                         ha='left', va='bottom')
-            self.ax.text(self.right_m * 0.98, 0.02, '+ Right →',
-                         transform=blend, fontsize=7.5, color='#546E7A',
-                         ha='right', va='bottom')
+            blend_bot = _mt.blended_transform_factory(all_xs[-1].transData,
+                                                      all_xs[-1].transAxes)
+            all_xs[-1].text(-self.left_m * 0.98, 0.02, '← Left',
+                            transform=blend_bot, fontsize=7.5, color='#546E7A',
+                            ha='left', va='bottom')
+            all_xs[-1].text(self.right_m * 0.98, 0.02, '+ Right →',
+                            transform=blend_bot, fontsize=7.5, color='#546E7A',
+                            ha='right', va='bottom')
 
-        # Single legend (values are embedded during hover via legend text updates)
-        if data:
-            self.ax.legend(fontsize=8, loc='best')
-
-        # Hover cursor (hidden until mouse enters)
-        self._cursor_vline = self.ax.axvline(
-            x=0, color='#D32F2F', linewidth=0.8, linestyle='--', alpha=0.0, zorder=15)
-        self._xpos_ann = None   # not used; (x,y) shown in header label instead
-        # ΔY indicator — top-right, shown on hover when cut/fill active
-        self._cf_ann = self.ax.text(
-            0.98, 0.97, '', transform=self.ax.transAxes,
-            fontsize=8, ha='right', va='top', color='#D32F2F',
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
-                      alpha=0.88, edgecolor='none'),
-            visible=False, zorder=20)
-
+        # Title on top axis, X-label on bottom axis
         name = self.cursor.get('name', 'XS')
         ch   = self.cursor['chainage']
         self.ax.set_title(f'{name}   Ch: {ch:.1f} m', fontsize=10, fontweight='bold')
-        self.ax.set_xlabel('Distance from centre  [ − Left  |  + Right ]  [m]', fontsize=9)
-        self.ax.set_ylabel('Elevation / Value', fontsize=9)
-        self.ax.grid(True, alpha=0.3)
-        # Re-attach sketch objects after ax.clear() — all use transData (data coords)
-        # which remains valid after clear since it references the live axes transform.
+        all_xs[-1].set_xlabel('Distance from centre  [ − Left  |  + Right ]  [m]', fontsize=9)
+
+        # Backward-compat single refs
+        self._cursor_vline = self._cursor_vlines[0] if self._cursor_vlines else None
+        self._cf_ann       = self._cf_anns[0]       if self._cf_anns       else None
+        self._xs_visible_cols = self._xs_vcols_per_win[0] if self._xs_vcols_per_win else []
+
+        # Re-attach sketch objects to first axis after clear
         for _obj in _saved_sketches:
             try:
                 if isinstance(_obj, (_MplRect, _MplEllipse)):
@@ -4416,20 +4474,25 @@ class XSectionDialog(QDialog):
 
         if self._xs_sketch_mode is not None:   # other sketch modes suppress hover display
             return
-        if (event.inaxes != self.ax or not self._xs_dist
-                or self._cursor_vline is None or event.xdata is None):
+        all_xs = [self.ax] + self._xs_extra_axes
+        if (event.inaxes not in all_xs or not self._xs_dist
+                or not self._cursor_vlines or event.xdata is None):
             return
+        j  = all_xs.index(event.inaxes)   # which window is being hovered
         x  = event.xdata
         xs = np.array(self._xs_dist, dtype=float)
 
-        self._cursor_vline.set_xdata([x, x])
-        self._cursor_vline.set_alpha(0.7)
+        # Move ALL cursor vlines to same x
+        for vl in self._cursor_vlines:
+            vl.set_xdata([x, x])
+            vl.set_alpha(0.7)
 
-        # Update top-bar (x, y) label
+        # Update top-bar (x, y) label using first visible col of hovered window
         if hasattr(self, '_lbl_xy'):
+            vis_j  = self._xs_vcols_per_win[j] if j < len(self._xs_vcols_per_win) else []
             _y_disp = ''
-            if self._xs_visible_cols:
-                _col0 = self._xs_visible_cols[0]
+            if vis_j:
+                _col0 = vis_j[0]
                 _ys0  = np.array(
                     [v if v is not None else np.nan
                      for v in self._xs_data.get(_col0, [])], dtype=float)
@@ -4438,17 +4501,18 @@ class XSectionDialog(QDialog):
                     if np.isfinite(_yv):
                         _y_disp = f'{_yv:.3f}'
             _x_disp = f'{x:+.2f}'
-            if _y_disp:
-                self._lbl_xy.setText(f'(x, y) = ({_x_disp}, {_y_disp})')
-            else:
-                self._lbl_xy.setText(f'x = {_x_disp} m')
+            self._lbl_xy.setText(
+                f'(x, y) = ({_x_disp}, {_y_disp})' if _y_disp else f'x = {_x_disp} m')
             self._lbl_xy.setVisible(True)
 
-        # Update legend entries with interpolated values
-        lgd = self.ax.get_legend()
-        if lgd:
-            texts = lgd.get_texts()
-            for i, col in enumerate(self._xs_visible_cols):
+        # Update legend on every axis with interpolated values
+        for jj, ax_jj in enumerate(all_xs):
+            lgd = ax_jj.get_legend()
+            if not lgd:
+                continue
+            vis_jj = self._xs_vcols_per_win[jj] if jj < len(self._xs_vcols_per_win) else []
+            texts  = lgd.get_texts()
+            for i, col in enumerate(vis_jj):
                 if i >= len(texts):
                     break
                 vals = self._xs_data.get(col, [])
@@ -4456,13 +4520,15 @@ class XSectionDialog(QDialog):
                 v    = float(np.interp(x, xs, ys))
                 texts[i].set_text(f'{col} [{v:.3f}]' if np.isfinite(v) else col)
 
-        # ΔY in top-right
-        cf1, cf2 = self._cf1_arr, self._cf2_arr
-        if cf1 is not None and cf2 is not None and self._cf_ann is not None:
-            dy = float(np.interp(x, xs, cf2 - cf1))
-            if np.isfinite(dy):
-                self._cf_ann.set_text(f'ΔY: {dy:+.3f} m')
-                self._cf_ann.set_visible(True)
+        # ΔY per window
+        for jj, cf_ann_jj in enumerate(self._cf_anns):
+            if jj < len(self._cf_pairs):
+                cf1, cf2 = self._cf_pairs[jj]
+                if cf1 is not None and cf2 is not None and cf_ann_jj is not None:
+                    dy = float(np.interp(x, xs, cf2 - cf1))
+                    if np.isfinite(dy):
+                        cf_ann_jj.set_text(f'ΔY: {dy:+.3f} m')
+                        cf_ann_jj.set_visible(True)
 
         self.canvas_xs.draw_idle()
 
@@ -4491,17 +4557,22 @@ class XSectionDialog(QDialog):
     def _on_leave(self, event):
         if self._xs_level_snap_art is not None:
             self._xs_level_snap_art.set_visible(False)
-        if self._cursor_vline is not None:
-            self._cursor_vline.set_alpha(0.0)
-        if self._cf_ann is not None:
-            self._cf_ann.set_visible(False)
+        for vl in self._cursor_vlines:
+            vl.set_alpha(0.0)
+        for cf_ann in self._cf_anns:
+            if cf_ann is not None:
+                cf_ann.set_visible(False)
         if hasattr(self, '_lbl_xy'):
             self._lbl_xy.setVisible(False)
-        # Reset legend texts to plain column names
-        lgd = self.ax.get_legend()
-        if lgd:
-            texts = lgd.get_texts()
-            for i, col in enumerate(self._xs_visible_cols):
+        # Reset all legend texts to plain column names
+        all_xs = [self.ax] + self._xs_extra_axes
+        for jj, ax_jj in enumerate(all_xs):
+            lgd = ax_jj.get_legend()
+            if not lgd:
+                continue
+            vis_jj = self._xs_vcols_per_win[jj] if jj < len(self._xs_vcols_per_win) else []
+            texts  = lgd.get_texts()
+            for i, col in enumerate(vis_jj):
                 if i < len(texts):
                     texts[i].set_text(col)
         # Hide hover point on map canvas
