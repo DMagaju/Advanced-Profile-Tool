@@ -3045,10 +3045,9 @@ class NormalProfileDock(QDockWidget):
     def _pick_zfield_color(self, vec, zf):
         c = QColorDialog.getColor(zf['color'], self)
         if c.isValid():
-            _style = f'background-color:{c.name()};border:1px solid #888;border-radius:2px;'
-            for _z in vec['z_fields']:
-                _z['color'] = c
-                _z['color_btn'].setStyleSheet(_style)
+            zf['color'] = c
+            zf['color_btn'].setStyleSheet(
+                f'background-color:{c.name()};border:1px solid #888;border-radius:2px;')
             self._refresh_plot()
 
     # ------------------------------------------------------------------ Save results / run
