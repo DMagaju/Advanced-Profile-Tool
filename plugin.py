@@ -11,11 +11,10 @@ Stage-Area side subplot with proper Elevation (m AD) axis; no duplicate legend.
 Live chart preview; hover sync to map canvas; scroll zoom; middle-mouse pan.
 """
 
-__version__    = '1.0'
-TOOL_ID        = 'advanced_profile_tool'
-DISPLAY_NAME   = 'Advanced Profile Tool'
-GROUP_NAME     = 'Advanced Profile Tool'
-_LINKED_PROMPT = 'FTA_Normal_Profile_V01_GM.txt'
+__version__  = '1.0'
+TOOL_ID      = 'advanced_profile_tool'
+DISPLAY_NAME = 'Advanced Profile Tool'
+GROUP_NAME   = 'Advanced Profile Tool'
 
 import csv
 import math
@@ -3201,15 +3200,15 @@ class NormalProfileDock(QDockWidget):
 
     def _run(self):
         if self.profile_geom is None:
-            QMessageBox.warning(self, 'FTA Profile', 'Draw a profile line first.')
+            QMessageBox.warning(self, 'Advanced Profile Tool', 'Draw a profile line first.')
             return
         raster_entries, vector_entries, col_meta = self._collect_entries()
         if not raster_entries and not vector_entries:
-            QMessageBox.warning(self, 'FTA Profile',
+            QMessageBox.warning(self, 'Advanced Profile Tool',
                 'No layers selected. Check at least one raster or add a vector Z-field.')
             return
         if QgsProject.instance().crs().isGeographic():
-            QMessageBox.critical(self, 'FTA Profile — CRS Error',
+            QMessageBox.critical(self, 'Advanced Profile Tool — CRS Error',
                 'Project CRS is Geographic (degrees).\n'
                 'Switch to a Projected Metric CRS first.')
             return
@@ -3223,7 +3222,7 @@ class NormalProfileDock(QDockWidget):
                 self.interval_spin.value()
             )
         except Exception as exc:
-            QMessageBox.critical(self, 'FTA Profile Error', str(exc))
+            QMessageBox.critical(self, 'Advanced Profile Tool — Error', str(exc))
             self.btn_run.setEnabled(True)
             self.progress.setRange(0, 100)
             self.progress.setValue(0)
@@ -5159,7 +5158,7 @@ class XSectionDialog(QDialog):
 # Plugin entry point
 # ---------------------------------------------------------------------------
 
-class FTAProfilePlugin:
+class AdvancedProfilePlugin:
 
     def __init__(self, iface):
         self.iface   = iface

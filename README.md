@@ -18,7 +18,7 @@ A QGIS plugin for extracting and visualising elevation and attribute profiles al
 ## Requirements
 
 - QGIS 3.28 or later
-- No external Python dependencies
+- matplotlib and numpy (included in standard QGIS / OSGeo4W installation; chart panel unavailable without them)
 
 ## Installation
 
@@ -33,8 +33,8 @@ A QGIS plugin for extracting and visualising elevation and attribute profiles al
 
 ## Usage
 
-1. Activate the plugin from **Plugins → Advanced Flood & Terrain Auditor → Advanced Profile Tool**
-2. Click **Draw** to digitise a profile alignment on the canvas, or use **Select Line Layer** to pick an existing line feature
+1. Activate the plugin from **Plugins → Advanced Profile Tool → Advanced Profile Tool**, or click the toolbar button
+2. Click **Draw Profile Line** to digitise a profile alignment on the canvas, or select an existing line layer from the **From layer** combo and click **Use**
 3. Add raster or vector layers to any of the three profile windows using the layer controls
 4. Use the cross-section button to open perpendicular XS views at any chainage
 5. Annotate using the sketch tools, then export to CSV or PNG
