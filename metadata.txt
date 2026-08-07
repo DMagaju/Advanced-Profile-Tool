@@ -12,6 +12,9 @@ tags=profile,elevation,flood,terrain,hydrology,water,DEM,cross section,raster,ve
 homepage=https://github.com/DMagaju/Advanced-Profile-Tool
 category=Plugins
 icon=icon.svg
+license=GNU General Public License v2 or later (GPLv2+)
+changelog=0.6 - Added line-layer-from-selection feature; sketch tool improvements
+    0.5 - Cross-section dialog, perpendicular XS markers, chainage cursor, CSV/PNG export
 experimental=False
 deprecated=False
 supportsQt6=yes

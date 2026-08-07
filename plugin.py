@@ -93,6 +93,11 @@ except AttributeError:
     _RASTER_FILTER = QgsMapLayerProxyModel.RasterLayer  # type: ignore[attr-defined]
 
 try:
+    _LINE_FILTER = QgsMapLayerProxyModel.Filter.LineLayer
+except AttributeError:
+    _LINE_FILTER = QgsMapLayerProxyModel.LineLayer  # type: ignore[attr-defined]
+
+try:
     _NUMERIC_FILTER = QgsFieldProxyModel.Filter.Numeric
 except AttributeError:
     _NUMERIC_FILTER = QgsFieldProxyModel.Numeric  # type: ignore[attr-defined]
@@ -521,6 +526,7 @@ class _CheckCombo(QComboBox):
         e.ignore()   # prevent accidental scroll changes
 
 
+
 # ---------------------------------------------------------------------------
 # Dock widget
 # ---------------------------------------------------------------------------
@@ -595,7 +601,6 @@ class NormalProfileDock(QDockWidget):
 
         # Vector rows
         self._vector_rows = []
-
 
         # Extra profile axes for split-window mode (populated by _rebuild_figure)
         self._extra_axes = []
@@ -992,6 +997,27 @@ class NormalProfileDock(QDockWidget):
         self.btn_clear.clicked.connect(self._clear_line)
         dr.addWidget(self.btn_draw); dr.addWidget(self.btn_clear)
 
+        # ---- Layer-based profile line selection --------------------------
+        ll = QHBoxLayout()
+        ll.setSpacing(4)
+        ll.addWidget(QLabel('From layer:'))
+        self._line_layer_combo = QgsMapLayerComboBox()
+        self._line_layer_combo.setFilters(_LINE_FILTER)
+        self._line_layer_combo.setAllowEmptyLayer(True)
+        self._line_layer_combo.setCurrentIndex(0)
+        self._line_layer_combo.setToolTip(
+            'Select a line layer containing the profile alignment.\n'
+            'The layer should have a single line feature (or only the first\n'
+            'feature will be used).'
+        )
+        self._line_layer_combo.wheelEvent = lambda e: e.ignore()
+        ll.addWidget(self._line_layer_combo, 1)
+        btn_use_layer = QPushButton('Use')
+        btn_use_layer.setFixedWidth(42)
+        btn_use_layer.setToolTip('Load the line from the selected layer as the profile line')
+        btn_use_layer.clicked.connect(self._use_line_layer)
+        ll.addWidget(btn_use_layer)
+
         self.lbl_line = QLabel('Profile line: not drawn')
         self.lbl_line.setStyleSheet('color:gray;font-style:italic;font-size:11px;')
 
@@ -1038,6 +1064,7 @@ class NormalProfileDock(QDockWidget):
 
         # ---- Always-visible draw controls (outside scroll) ---------------
         outer.addLayout(dr)
+        outer.addLayout(ll)
         outer.addWidget(self.lbl_line)
         outer.addLayout(mls)
         outer.addLayout(iv)
@@ -1574,6 +1601,38 @@ class NormalProfileDock(QDockWidget):
         self.btn_draw.setChecked(False)
         self._toggle_digitizing(False)
         self._on_live_update(geom)  # live for both Raster and Vector tabs
+
+    def _use_line_layer(self):
+        """Load the first line feature from the selected layer as the profile line."""
+        lyr = self._line_layer_combo.currentLayer()
+        if lyr is None:
+            self.lbl_line.setText('No line layer selected.')
+            self.lbl_line.setStyleSheet('color:#E53935;font-style:italic;font-size:11px;')
+            return
+
+        feats = list(lyr.getFeatures())
+        if not feats:
+            self.lbl_line.setText('Selected layer has no features.')
+            self.lbl_line.setStyleSheet('color:#E53935;font-style:italic;font-size:11px;')
+            return
+
+        if len(feats) > 1:
+            self.iface.messageBar().pushMessage(
+                'Advanced Profile Tool',
+                f'Layer has {len(feats)} features — using the first feature only.',
+                level=1, duration=5)
+
+        geom = feats[0].geometry()
+        if geom is None or geom.isEmpty():
+            self.lbl_line.setText('First feature has no geometry.')
+            self.lbl_line.setStyleSheet('color:#E53935;font-style:italic;font-size:11px;')
+            return
+
+        # Merge multi-part geometry into a single polyline
+        if geom.isMultipart():
+            geom = geom.mergeLines()
+
+        self._on_line_captured(geom)
 
     def _pick_map_line_color(self):
         c = QColorDialog.getColor(self._map_line_color, self)
