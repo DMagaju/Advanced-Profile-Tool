@@ -2,7 +2,7 @@
 name=Advanced Profile Tool
 qgisMinimumVersion=3.28
 description=Interactive normal profile tool for raster and vector surfaces along a user-defined alignment
-version=0.6
+version=1.0
 author=Dipendra Magaju
 email=dipen.magaju@gmail.com
 about=Draw a profile line on the map canvas and instantly extract elevation or attribute profiles from raster DEMs and vector layers. Features: up to 3 independent profile windows with per-window column assignment, Y-axis labels, and cut/fill shading; cross-section dialog that mirrors the profile layout (same windows, same data, live sync); perpendicular XS markers on the map with name labels; sketch annotation tools (pen, line, arrow, text, level marker, rect, ellipse) with Ctrl+click polyline mode; per-layer line width, opacity, and colour controls; configurable map line style (colour, width, opacity); chainage cursor tool; CSV and PNG export. Built for water engineers and flood modellers.
@@ -13,7 +13,7 @@ homepage=https://github.com/DMagaju/Advanced-Profile-Tool
 category=Plugins
 icon=icon.svg
 license=GNU General Public License v2 or later (GPLv2+)
-changelog=0.6 - Added line-layer-from-selection feature; sketch tool improvements
+changelog=1.0 - Renamed to Advanced Profile Tool; line-layer-from-selection feature; sketch tool improvements
     0.5 - Cross-section dialog, perpendicular XS markers, chainage cursor, CSV/PNG export
 experimental=False
 deprecated=False

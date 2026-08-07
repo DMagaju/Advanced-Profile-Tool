@@ -11,10 +11,10 @@ Stage-Area side subplot with proper Elevation (m AD) axis; no duplicate legend.
 Live chart preview; hover sync to map canvas; scroll zoom; middle-mouse pan.
 """
 
-__version__    = '0.5'
-TOOL_ID        = 'fta_profile_tool'
+__version__    = '1.0'
+TOOL_ID        = 'advanced_profile_tool'
 DISPLAY_NAME   = 'Advanced Profile Tool'
-GROUP_NAME     = 'Advanced Flood & Terrain Auditor'
+GROUP_NAME     = 'Advanced Profile Tool'
 _LINKED_PROMPT = 'FTA_Normal_Profile_V01_GM.txt'
 
 import csv
@@ -5168,25 +5168,25 @@ class FTAProfilePlugin:
         self.dock    = None
 
     def initGui(self):
-        self.toolbar = self.iface.addToolBar('FTA Tools')
-        self.toolbar.setObjectName('FTAToolsToolbar')
+        self.toolbar = self.iface.addToolBar('Advanced Profile Tool')
+        self.toolbar.setObjectName('AdvancedProfileToolToolbar')
         import os as _os
         _icon_path = _os.path.join(_os.path.dirname(__file__), 'icon.svg')
         _icon = QIcon(_icon_path) if _os.path.exists(_icon_path) else QIcon()
-        self.action = QAction(_icon, 'Normal Profile', self.iface.mainWindow())
+        self.action = QAction(_icon, 'Advanced Profile Tool', self.iface.mainWindow())
         self.action.setCheckable(True)
         self.action.setToolTip('Advanced Profile Tool')
         self.action.triggered.connect(self._toggle_dock)
         self.toolbar.addAction(self.action)
-        self.iface.addPluginToMenu('&FTA Tools', self.action)
+        self.iface.addPluginToMenu('&Advanced Profile Tool', self.action)
         self.dock = NormalProfileDock(self.iface, self.iface.mainWindow())
         self.iface.addDockWidget(_RIGHT_DOCK, self.dock)
         self.dock.hide()
 
         # Chart dock — registered here (after iface is ready) so Qt properly
         # docks it into the main window. Canvas/toolbar are wired in next line.
-        self._chart_dock = QDockWidget('FTA Profile — Chart', self.iface.mainWindow())
-        self._chart_dock.setObjectName('FTANormalProfileChart')
+        self._chart_dock = QDockWidget('Advanced Profile Tool — Chart', self.iface.mainWindow())
+        self._chart_dock.setObjectName('AdvancedProfileToolChart')
         self._chart_dock.setMinimumWidth(500)
         self._chart_dock.setMinimumHeight(300)
         self.iface.addDockWidget(_BOTTOM_DOCK, self._chart_dock)
@@ -5227,7 +5227,7 @@ class FTAProfilePlugin:
                 pass
             self._chart_dock = None
         if self.action:
-            self.iface.removePluginMenu('&FTA Tools', self.action)
+            self.iface.removePluginMenu('&Advanced Profile Tool', self.action)
             self.action = None
         if self.toolbar:
             self.toolbar.deleteLater()
