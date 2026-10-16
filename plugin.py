@@ -21,10 +21,11 @@ import csv
 import json
 import math
 import os
+import tempfile
 from collections import defaultdict
 from datetime import datetime
 
-from qgis.PyQt.QtCore import Qt, pyqtSignal, QTimer, QSizeF, QPointF, QObject, QEvent, QRect, QPoint, QSize
+from qgis.PyQt.QtCore import Qt, pyqtSignal, QTimer, QSizeF, QPointF, QObject, QEvent, QRect, QPoint, QSize, QVariant
 from qgis.PyQt.QtWidgets import (
     QAction, QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QDoubleSpinBox, QPushButton, QLineEdit,
@@ -32,17 +33,18 @@ from qgis.PyQt.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QColorDialog, QScrollArea,
     QListWidget, QListWidgetItem, QTabWidget, QInputDialog, QProgressBar,
     QSpinBox, QDialog, QMenu, QLayout, QStackedWidget,
+    QToolButton, QTextBrowser,
 )
 from qgis.PyQt.QtGui import QColor, QIcon, QPixmap, QPainter, QPen, QStandardItem, QStandardItemModel, QTextDocument, QCursor
 
-from qgis.gui import QgsMapLayerComboBox, QgsFieldComboBox, QgsRubberBand
+from qgis.gui import QgsMapLayerComboBox, QgsFieldComboBox, QgsRubberBand, QgsVertexMarker
 from qgis.core import (
     Qgis, QgsProject, QgsWkbTypes, QgsGeometry, QgsPointXY, QgsPoint, QgsLineString,
     QgsSpatialIndex, QgsFieldProxyModel, QgsMapLayerProxyModel,
     QgsRasterLayer, QgsMapLayer, QgsRectangle, QgsFeatureRequest,
-    QgsVectorFileWriter, QgsFields, QgsFeature, QgsVectorLayer,
+    QgsVectorFileWriter, QgsFields, QgsField, QgsFeature, QgsVectorLayer,
     QgsCoordinateReferenceSystem, QgsProcessingUtils, QgsFeedback,
-    QgsCoordinateTransform,
+    QgsCoordinateTransform, QgsProviderRegistry,
 )
 from qgis.analysis import QgsInterpolator, QgsTinInterpolator, QgsGridFileWriter
 
@@ -220,6 +222,7 @@ if MATPLOTLIB_AVAILABLE:
             _NavToolbar = None
 
 from .profile_line_tool import ProfileLineTool, VertexSelectTool, ShapeDrawTool, ShapeRotateTool
+from . import aptool_style as _style
 
 _CHART_COLORS = [
     '#2196F3', '#F44336', '#4CAF50', '#FF9800',
@@ -438,7 +441,7 @@ def _section_label(text: str, pixmap: QPixmap = None) -> QWidget:
         badge = QLabel(); badge.setPixmap(pixmap); badge.setFixedSize(14, 14)
         h.addWidget(badge)
     lbl = QLabel(text)
-    lbl.setStyleSheet('font-size:11px;font-weight:bold;color:#546E7A;')
+    lbl.setStyleSheet(_style.section_label_style())
     h.addWidget(lbl)
     h.addStretch()
     return w
@@ -802,6 +805,9 @@ class NormalProfileDock(QDockWidget):
         self._ch_cursor_artists   = []   # [list_of_artists_per_cursor, ...] parallel list
         self._ch_cursor_map_bands = []   # QgsRubberBand markers on the map canvas
         self._ch_cursor_annotations = [] # QgsTextAnnotation name labels on map canvas
+        self._profile_markers      = []   # [{'chainage': float, 'point': QgsPointXY, 'name': str}, ...]
+        self._profile_marker_artists = []  # matplotlib artists on the profile plot, one per marker
+        self._profile_marker_bands = []   # QgsVertexMarker on the map canvas, one per marker
         self._xs_dialogs          = []   # open XSectionDialog instances for cut/fill sync
         self._terrain_check_xs_dialogs = []   # open TerrainCheckXSDialog instances
         self._embank_check_xs_dialogs = []   # open EmbankCheckXSDialog instances
@@ -1489,6 +1495,9 @@ class NormalProfileDock(QDockWidget):
         self._ch_cursors         = []
         self._ch_cursor_artists  = []
         self._clear_cursor_map_points()
+        self._profile_markers        = []
+        self._profile_marker_artists = []
+        self._clear_marker_map_points()
         self.lbl_line.setText('Profile line: not drawn')
         self.lbl_line.setStyleSheet('color:gray;font-style:italic;font-size:11px;')
         self.lbl_status.setText('')
@@ -1590,9 +1599,20 @@ class NormalProfileDock(QDockWidget):
     def _build_ui(self):
         root = QWidget()
         root.setMinimumWidth(320)
+        root.setStyleSheet(_style.WIDGET_STYLE)
         self.setWidget(root)
 
-        outer = QVBoxLayout(root)
+        dock_v = QVBoxLayout(root)
+        dock_v.setContentsMargins(0, 0, 0, 0)
+        dock_v.setSpacing(0)
+
+        icon_path = os.path.join(os.path.dirname(__file__), 'icon.svg')
+        dock_v.addWidget(_style.build_header_bar('Advanced Profile Tool', icon_path))
+
+        body = QWidget()
+        dock_v.addWidget(body, 1)
+
+        outer = QVBoxLayout(body)
         outer.setContentsMargins(6, 6, 6, 6)
         outer.setSpacing(4)
 
@@ -1609,11 +1629,7 @@ class NormalProfileDock(QDockWidget):
 
         # ---- Top-level tabs (Profile / 1D Profile) -----------------------
         tabs = QTabWidget()
-        tabs.setStyleSheet(
-            'QTabWidget::pane{border:1px solid #BDBDBD;border-top:none;}'
-            'QTabBar::tab{padding:4px 12px;font-size:11px;}'
-            'QTabBar::tab:selected{font-weight:bold;}'
-        )
+        tabs.setStyleSheet(_style.TAB_STYLE)
 
         # Profile tab — raster AND vector layers together, one scrollable
         # list (previously two separate Raster/Vector tabs — merged so a
@@ -1692,11 +1708,7 @@ class NormalProfileDock(QDockWidget):
         # them was the single biggest space cost in this dock). -----------
         win_tabs = QTabWidget()
         self._win_tabs_widget = win_tabs
-        win_tabs.setStyleSheet(
-            'QTabWidget::pane{border:1px solid #BDBDBD;border-top:none;}'
-            'QTabBar::tab{padding:2px 10px;font-size:10px;}'
-            'QTabBar::tab:selected{font-weight:bold;}'
-        )
+        win_tabs.setStyleSheet(_style.SUBTAB_STYLE)
         self.pw = win_tabs
 
         _default_win_names = ['Elevation [masl]', 'Depth [m]', 'Velocity [m/s]']
@@ -1816,11 +1828,12 @@ class NormalProfileDock(QDockWidget):
             'Refresh Profile — re-extracts the profile from the current layers.\n'
             'This does not run any hydraulic/hydrologic model.'
         )
-        self.btn_run.setStyleSheet('font-weight:bold;padding:5px;')
+        self.btn_run.setStyleSheet(_style.PRIMARY_BUTTON_STYLE)
         self.btn_run.clicked.connect(self._run)
 
         self.btn_open_chart = QPushButton('Chart')
         self.btn_open_chart.setToolTip('Show / Hide Chart')
+        self.btn_open_chart.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_open_chart.clicked.connect(self._on_open_chart)
 
         # Modify Terrain-only — Save/Open/Close the whole multi-step
@@ -1870,6 +1883,7 @@ class NormalProfileDock(QDockWidget):
             'Generate a TIFF of the designed channel surface from the\n'
             'current alignment, cross-sections and control sections.'
         )
+        self.btn_terrain_create_tiff.setStyleSheet(_style.PRIMARY_BUTTON_STYLE)
         self.btn_terrain_create_tiff.clicked.connect(self._on_terrain_create_tiff)
         self.btn_terrain_create_tiff.setVisible(False)   # idx 0 (Layer Profile) is the default tab
 
@@ -1879,6 +1893,7 @@ class NormalProfileDock(QDockWidget):
             'of the existing ground DEM, replacing only the corridor\'s\n'
             'own footprint.'
         )
+        self.btn_terrain_merge_tiff.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_terrain_merge_tiff.clicked.connect(self._on_terrain_merge_tiff)
         self.btn_terrain_merge_tiff.setVisible(False)   # idx 0 (Layer Profile) is the default tab
 
@@ -1917,6 +1932,7 @@ class NormalProfileDock(QDockWidget):
             'Generate a TIFF of the designed embankment surface from the\n'
             'current alignment, cross-sections and control sections.'
         )
+        self.btn_embank_create_tiff.setStyleSheet(_style.PRIMARY_BUTTON_STYLE)
         self.btn_embank_create_tiff.clicked.connect(self._on_embank_create_tiff)
         self.btn_embank_create_tiff.setVisible(False)
 
@@ -1926,6 +1942,7 @@ class NormalProfileDock(QDockWidget):
             'of the existing ground DEM, replacing only the corridor\'s\n'
             'own footprint.'
         )
+        self.btn_embank_merge_tiff.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_embank_merge_tiff.clicked.connect(self._on_embank_merge_tiff)
         self.btn_embank_merge_tiff.setVisible(False)
 
@@ -2155,6 +2172,7 @@ class NormalProfileDock(QDockWidget):
             self.btn_save_png = QPushButton('Save Plot')
             self.btn_save_png.setFixedWidth(80)
             self.btn_save_png.setEnabled(False)
+            self.btn_save_png.setStyleSheet(_style.PRIMARY_BUTTON_STYLE)
             self.btn_save_png.clicked.connect(self._save_plot)
             top_bar.addWidget(self.btn_save_png)
             plot_outer.addLayout(top_bar)
@@ -2225,6 +2243,31 @@ class NormalProfileDock(QDockWidget):
             _btn_xs.clicked.connect(self._open_xs_menu)
             self._xs_btn = _btn_xs
             _sk_bar.addWidget(_btn_xs)
+
+            # Marker tool — sits right next to the Cross-Section ('⊥ XS')
+            # button per explicit request. Behaves like any other sketch
+            # tool (checkable, managed by _sketch_activate/_sketch_
+            # deactivate via self._sketch_btns) but its own click handling
+            # lives in _sketch_on_press's 'marker' branch: drops a point on
+            # BOTH the profile chart and the map canvas (interpolated along
+            # self.profile_geom at the clicked chainage), saved later as
+            # its own 'marker' shapefile alongside the plot (see
+            # _write_markers_shp / _save_plot).
+            _btn_marker = QPushButton('📍')
+            _btn_marker.setCheckable(True)
+            _btn_marker.setFixedSize(38, 22)
+            _btn_marker.setToolTip(
+                'Marker — click on the profile to drop a point marker on\n'
+                'the map canvas at that chainage. Saved as its own \'marker\'\n'
+                'shapefile alongside the plot when you click Save Plot.'
+            )
+            _btn_marker.setStyleSheet(_tool_style)
+            _btn_marker.clicked.connect(
+                lambda chk: self._sketch_activate('marker') if chk else self._sketch_deactivate()
+            )
+            _sk_bar.addWidget(_btn_marker)
+            self._sketch_btns['marker'] = _btn_marker
+
             plot_outer.addLayout(_sk_bar)
 
             # ── Sketch toolbar — Row 2: style options + colours ────────────────
@@ -2678,6 +2721,9 @@ class NormalProfileDock(QDockWidget):
         self._ch_cursors         = []
         self._ch_cursor_artists  = []
         self._clear_cursor_map_points()
+        self._profile_markers        = []
+        self._profile_marker_artists = []
+        self._clear_marker_map_points()
         self._close_all_xs_dialogs()
         if self._perm_band:
             self.canvas.scene().removeItem(self._perm_band)
@@ -4688,6 +4734,69 @@ class NormalProfileDock(QDockWidget):
             self._remove_ann(ann)
         self._ch_cursor_annotations = []
 
+    # ------------------------------------------------------------------ profile markers
+    # Point markers dropped by clicking the 'marker' sketch tool on the
+    # profile chart — unlike a chainage cursor (a reference LINE across
+    # the chart), these are a single POINT on both the chart and the map
+    # canvas (interpolated along self.profile_geom at the clicked
+    # chainage), persisted independently of the sketch Clear button, and
+    # exported as their own 'marker' shapefile when the plot is saved
+    # (see _write_markers_shp).
+
+    def _add_marker_map_point(self, pt):
+        """Place a small X marker on the map canvas at pt (QgsPointXY)."""
+        try:
+            vm = QgsVertexMarker(self.canvas)
+            try:
+                vm.setIconType(QgsVertexMarker.IconType.ICON_X)
+            except AttributeError:
+                vm.setIconType(QgsVertexMarker.ICON_X)  # type: ignore[attr-defined]
+            vm.setColor(QColor(211, 47, 47))
+            vm.setIconSize(12)
+            vm.setPenWidth(2)
+            vm.setCenter(QgsPointXY(pt))
+            self._profile_marker_bands.append(vm)
+        except Exception:
+            self._profile_marker_bands.append(None)
+
+    def _remove_marker_map_point(self, idx):
+        """Remove the map marker at the given profile-marker index."""
+        if idx < len(self._profile_marker_bands):
+            band = self._profile_marker_bands.pop(idx)
+            if band is not None:
+                try: self.canvas.scene().removeItem(band)
+                except Exception: pass
+
+    def _clear_marker_map_points(self):
+        """Remove all placed profile-marker map markers."""
+        for band in self._profile_marker_bands:
+            if band is not None:
+                try: self.canvas.scene().removeItem(band)
+                except Exception: pass
+        self._profile_marker_bands = []
+
+    def _refresh_profile_markers(self):
+        """Rebuild all placed profile-marker chart artists from
+        self._profile_markers — called after every _plot() (the axes may
+        have just been cleared) and after placing a new marker."""
+        for art in self._profile_marker_artists:
+            try: art.remove()
+            except Exception: pass
+        self._profile_marker_artists = []
+
+        if not self._profile_markers or not MATPLOTLIB_AVAILABLE:
+            return
+        all_p = [self.ax] + self._extra_axes
+        for m in self._profile_markers:
+            ax_idx = m.get('ax_idx', 0)
+            ax_m = all_p[ax_idx] if ax_idx < len(all_p) else self.ax
+            art, = ax_m.plot(
+                [m['chainage']], [m['y']],
+                marker='o', markersize=8, linestyle='none',
+                markerfacecolor='#D32F2F', markeredgecolor='white',
+                markeredgewidth=1.2, zorder=12, clip_on=False)
+            self._profile_marker_artists.append(art)
+
     def _sketch_on_press(self, event):
         self._sketch_pressed = True
         ax = event.inaxes
@@ -4841,6 +4950,23 @@ class NormalProfileDock(QDockWidget):
             self._ch_cursors.append({'chainage': event.xdata, 'ax_idx': ax_idx, 'name': name})
             self._add_cursor_map_point(event.xdata, name)
             self._refresh_chainage_cursors()
+            self.canvas_plot.draw_idle()
+            return
+
+        elif self._sketch_mode == 'marker':
+            self._sketch_pressed = False
+            if self.profile_geom is None:
+                return
+            all_p = [self.ax] + self._extra_axes
+            ax_idx = all_p.index(ax) if ax in all_p else 0
+            name = f'M-{len(self._profile_markers) + 1:03d}'
+            pt = self.profile_geom.interpolate(fx).asPoint()
+            self._profile_markers.append({
+                'chainage': fx, 'y': fy, 'ax_idx': ax_idx,
+                'point': pt, 'name': name,
+            })
+            self._add_marker_map_point(pt)
+            self._refresh_profile_markers()
             self.canvas_plot.draw_idle()
             return
 
@@ -5331,6 +5457,7 @@ class NormalProfileDock(QDockWidget):
         l.addSpacing(6)
         l.addWidget(_section_label('Polygon Type'))
         self.tabs_shapes_polygon_type = QTabWidget()
+        self.tabs_shapes_polygon_type.setStyleSheet(_style.SUBTAB_STYLE)
         self.tabs_shapes_polygon_type.addTab(self._build_shapes_normal_polygon_tab(), 'Normal Polygon')
         self.tabs_shapes_polygon_type.addTab(self._build_wetland_tab(), 'Wetland Pond')
         l.addWidget(self.tabs_shapes_polygon_type)
@@ -5455,6 +5582,7 @@ class NormalProfileDock(QDockWidget):
         v.setSpacing(4)
 
         self.tabs_wetland_workflow = QTabWidget()
+        self.tabs_wetland_workflow.setStyleSheet(_style.SUBTAB_STYLE)
         self.tabs_wetland_workflow.addTab(self._build_wetland_plan_tab(), 'Plan')
         self.tabs_wetland_workflow.addTab(self._build_wetland_section_tab(), 'Section')
         v.addWidget(self.tabs_wetland_workflow)
@@ -6442,6 +6570,7 @@ class NormalProfileDock(QDockWidget):
         # dock jumps tabs on its own, same convention as Embankment
         # Surface's own Alignment/Cross-Section split.
         self.tabs_terrain_workflow = QTabWidget()
+        self.tabs_terrain_workflow.setStyleSheet(_style.SUBTAB_STYLE)
         tab_a = QWidget(); la = QVBoxLayout(tab_a)
         la.setContentsMargins(4, 6, 4, 4); la.setSpacing(3)
         lh = la   # Horizontal Alignment content below goes into the shared tab
@@ -6494,8 +6623,21 @@ class NormalProfileDock(QDockWidget):
             'Right-click or double-click to finish.\n'
             'Ctrl+Z to undo the last vertex.'
         )
+        self.btn_terrain_draw.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_terrain_draw.clicked.connect(self._toggle_terrain_digitizing)
         fillet_row.addWidget(self.btn_terrain_draw)
+
+        self.btn_terrain_import = QPushButton('Import Line')
+        self.btn_terrain_import.setToolTip(
+            'Import an existing line (shapefile or GeoPackage) as the\n'
+            'horizontal alignment, instead of drawing one by hand.\n'
+            'Only the first feature in the file is used. Vertex editing,\n'
+            'fillets, etc. all work exactly the same afterwards as a\n'
+            'hand-drawn line.'
+        )
+        self.btn_terrain_import.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
+        self.btn_terrain_import.clicked.connect(self._on_terrain_import_line)
+        fillet_row.addWidget(self.btn_terrain_import)
 
         # Applies the Fillet radius field's value to EVERY vertex at
         # once, uniformly — replaces the old 'raise to at least the
@@ -6514,6 +6656,7 @@ class NormalProfileDock(QDockWidget):
             'the normal way: select one with Edit Vertices, then adjust\n'
             'the radius above.'
         )
+        self.btn_terrain_set_global_radius.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_terrain_set_global_radius.clicked.connect(self._on_terrain_set_global_radius)
         fillet_row.addWidget(self.btn_terrain_set_global_radius)
 
@@ -7216,6 +7359,86 @@ class NormalProfileDock(QDockWidget):
             if self._prev_tool:
                 self.canvas.setMapTool(self._prev_tool)
 
+    def _on_terrain_import_line(self):
+        self._import_alignment_line('Channel', self._on_terrain_line_captured)
+
+    def _import_alignment_line(self, surface_label, captured_callback):
+        """Shared 'Import Line' handler for Channel Surface and Embankment
+        Surface — lets the user pick an existing line shapefile or
+        GeoPackage layer instead of hand-drawing the horizontal alignment.
+        Only the first feature is used; the resulting geometry is fed into
+        captured_callback (_on_terrain_line_captured / _on_embank_line_
+        captured) — the exact same pipeline a hand-drawn line goes
+        through, so vertex editing/fillets/etc. all work identically
+        afterwards."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, f'Import {surface_label} Horizontal Alignment', '',
+            'Vector Files (*.shp *.gpkg);;All Files (*)')
+        if not path:
+            return
+
+        try:
+            sublayers = QgsProviderRegistry.instance().querySublayers(path)
+        except Exception as exc:
+            QMessageBox.warning(self, 'Advanced Profile Tool', f'Could not read file:\n{exc}')
+            return
+
+        line_subs = [
+            s for s in sublayers
+            if s.type() == Qgis.LayerType.Vector
+            and QgsWkbTypes.geometryType(s.wkbType()) == QgsWkbTypes.LineGeometry
+        ]
+        if not line_subs:
+            QMessageBox.warning(self, 'Advanced Profile Tool', f'No line layers found in:\n{path}')
+            return
+
+        if len(line_subs) == 1:
+            chosen = line_subs[0]
+        else:
+            names = [s.name() for s in line_subs]
+            name, ok = QInputDialog.getItem(
+                self, 'Select Layer',
+                'This file has multiple line layers — pick one:',
+                names, 0, False)
+            if not ok:
+                return
+            chosen = line_subs[names.index(name)]
+
+        layer = QgsVectorLayer(chosen.uri(), chosen.name(), chosen.providerKey())
+        if not layer.isValid():
+            QMessageBox.warning(self, 'Advanced Profile Tool', f'Could not open layer from:\n{path}')
+            return
+
+        feats = list(layer.getFeatures())
+        if not feats:
+            QMessageBox.warning(self, 'Advanced Profile Tool', 'The selected layer has no features.')
+            return
+        if len(feats) > 1:
+            reply = QMessageBox.question(
+                self, 'Advanced Profile Tool',
+                f'This layer has {len(feats)} features — only the first one will be\n'
+                'used as the horizontal alignment. Continue?',
+                _MB_YES | _MB_NO)
+            if reply != _MB_YES:
+                return
+
+        geom = feats[0].geometry()
+        if geom is None or geom.isEmpty():
+            QMessageBox.warning(self, 'Advanced Profile Tool', 'The first feature has no geometry.')
+            return
+
+        canvas_crs = self.canvas.mapSettings().destinationCrs()
+        if layer.crs().isValid() and layer.crs() != canvas_crs:
+            try:
+                xform = QgsCoordinateTransform(layer.crs(), canvas_crs, QgsProject.instance())
+                geom.transform(xform)
+            except Exception as exc:
+                QMessageBox.warning(self, 'Advanced Profile Tool',
+                                     f'Could not reproject the imported line:\n{exc}')
+                return
+
+        captured_callback(geom)
+
     def _on_terrain_line_captured(self, geom):
         if geom.isMultipart():
             parts = geom.asMultiPolyline()
@@ -7413,6 +7636,9 @@ class NormalProfileDock(QDockWidget):
         self._ch_cursors         = []
         self._ch_cursor_artists  = []
         self._clear_cursor_map_points()
+        self._profile_markers        = []
+        self._profile_marker_artists = []
+        self._clear_marker_map_points()
         self._hide_hover()
         self._terrain_vertex_radii = {}
         self._terrain_selected_vertex = None
@@ -10255,13 +10481,416 @@ class NormalProfileDock(QDockWidget):
         return layer
 
     def _on_terrain_merge_tiff(self):
-        """Placeholder — will paste a previously created channel-design
-        TIFF into a copy of the existing ground DEM, replacing only the
-        corridor's own footprint (same idea as a GIS/CAD 'paste surface'),
-        once Create TIFF exists to produce one."""
-        QMessageBox.information(
-            self, 'Advanced Profile Tool',
-            'Merge TIFF is not implemented yet — coming soon.')
+        """Pastes a previously created channel-design TIFF into a copy of
+        an existing LiDAR/ground raster, replacing only the corridor's own
+        footprint (same idea as a GIS/CAD 'paste surface'). See
+        _run_merge_tiff_dialog / _merge_lidar_with_design."""
+        self._run_merge_tiff_dialog('Channel', self._terrain_last_tiff_layer)
+
+    # ------------------------------------------------------------------ Merge TIFF
+    # Shared by both Channel Surface and Embankment Surface tabs — ported
+    # from the standalone MergeLiDARWithDesignSurface Processing algorithm
+    # (Flood Pre-Modelling library) so Merge TIFF can run it directly
+    # without going through the Processing Toolbox. The merged output is
+    # pixel-perfect identical to the LiDAR everywhere outside the design
+    # surface's own footprint; a difference raster (merged minus LiDAR) is
+    # also produced for a quick visual QA of the ground change.
+
+    _MERGE_RESAMPLE_OPTIONS = ['Bilinear', 'Nearest Neighbour', 'Cubic', 'Cubic Spline', 'Lanczos']
+
+    @staticmethod
+    def _merge_gdal_resample_alg(gdal_mod, index):
+        algs = [
+            gdal_mod.GRA_Bilinear,
+            gdal_mod.GRA_NearestNeighbour,
+            gdal_mod.GRA_Cubic,
+            gdal_mod.GRA_CubicSpline,
+            gdal_mod.GRA_Lanczos,
+        ]
+        return algs[index]
+
+    @staticmethod
+    def _merge_gdal_to_numpy_dtype(gdal_mod, gdal_dtype):
+        mapping = {
+            gdal_mod.GDT_Byte:    np.uint8,
+            gdal_mod.GDT_UInt16:  np.uint16,
+            gdal_mod.GDT_Int16:   np.int16,
+            gdal_mod.GDT_UInt32:  np.uint32,
+            gdal_mod.GDT_Int32:   np.int32,
+            gdal_mod.GDT_Float32: np.float32,
+            gdal_mod.GDT_Float64: np.float64,
+        }
+        return mapping.get(gdal_dtype, np.float32)
+
+    def _merge_lidar_with_design(self, lidar_layer, design_layer, resample_idx, output_path, diff_path):
+        """Overlays design_layer onto lidar_layer, replacing only the
+        pixels the design surface covers, and writes:
+          - output_path: merged raster — same grid/CRS/nodata/dtype as the
+            LiDAR, identical to it everywhere outside the design footprint
+          - diff_path: difference raster (merged minus LiDAR), non-zero
+            only within the design footprint, nodata (-9999) elsewhere
+        Raises RuntimeError with a user-facing message on failure. Returns
+        (n_valid, n_total, diff_min, diff_max)."""
+        try:
+            from osgeo import gdal
+        except ImportError:
+            raise RuntimeError('GDAL Python bindings are not available in this QGIS install.')
+        if not MATPLOTLIB_AVAILABLE:
+            raise RuntimeError('NumPy is not available in this QGIS install.')
+
+        lidar_path   = lidar_layer.source()
+        design_path  = design_layer.source()
+        resample_alg = self._merge_gdal_resample_alg(gdal, resample_idx)
+
+        lidar_ds = gdal.Open(lidar_path, gdal.GA_ReadOnly)
+        if not lidar_ds:
+            raise RuntimeError(f'Could not open LiDAR raster: {lidar_path}')
+
+        lidar_band   = lidar_ds.GetRasterBand(1)
+        lidar_gt     = lidar_ds.GetGeoTransform()
+        lidar_proj   = lidar_ds.GetProjection()
+        lidar_cols   = lidar_ds.RasterXSize
+        lidar_rows   = lidar_ds.RasterYSize
+        lidar_nodata = lidar_band.GetNoDataValue()
+        lidar_dtype  = lidar_band.DataType
+        numpy_dtype  = self._merge_gdal_to_numpy_dtype(gdal, lidar_dtype)
+
+        x_min = lidar_gt[0]
+        x_res = lidar_gt[1]
+        y_max = lidar_gt[3]
+        y_res = abs(lidar_gt[5])
+        x_max = x_min + x_res * lidar_cols
+        y_min = y_max - y_res * lidar_rows
+
+        tmp_dir     = tempfile.mkdtemp(prefix='advprofiletool_merge_')
+        warped_path = os.path.join(tmp_dir, 'warped_design.tif')
+
+        warp_opts = gdal.WarpOptions(
+            outputBounds=(x_min, y_min, x_max, y_max),
+            xRes=x_res, yRes=y_res,
+            dstSRS=lidar_proj,
+            resampleAlg=resample_alg,
+            outputType=gdal.GDT_Float64,
+            creationOptions=['COMPRESS=LZW'],
+        )
+        warped_ds = gdal.Warp(warped_path, design_path, options=warp_opts)
+        if not warped_ds:
+            raise RuntimeError(
+                'Failed to warp the design surface onto the LiDAR grid. '
+                'Check that the design surface raster is valid and readable.')
+        warped_ds = None
+
+        lidar_array = lidar_band.ReadAsArray().astype(np.float64)
+        lidar_ds = None
+
+        warped_ds = gdal.Open(warped_path, gdal.GA_ReadOnly)
+        if not warped_ds:
+            raise RuntimeError(f'Could not re-open warped design surface at: {warped_path}')
+        warped_band        = warped_ds.GetRasterBand(1)
+        design_array       = warped_band.ReadAsArray().astype(np.float64)
+        design_nodata_warp = warped_band.GetNoDataValue()
+        warped_ds = None
+
+        if design_nodata_warp is not None:
+            valid_mask = ~np.isnan(design_array) & (design_array != design_nodata_warp)
+        else:
+            valid_mask = ~np.isnan(design_array)
+
+        n_valid = int(valid_mask.sum())
+        n_total = lidar_rows * lidar_cols
+
+        output_array = lidar_array.copy()
+        output_array[valid_mask] = design_array[valid_mask]
+
+        DIFF_NODATA = -9999.0
+        diff_array = np.full((lidar_rows, lidar_cols), DIFF_NODATA, dtype=np.float32)
+        diff_array[valid_mask] = (output_array[valid_mask] - lidar_array[valid_mask]).astype(np.float32)
+
+        diff_min = float(diff_array[valid_mask].min()) if n_valid > 0 else 0.0
+        diff_max = float(diff_array[valid_mask].max()) if n_valid > 0 else 0.0
+
+        driver = gdal.GetDriverByName('GTiff')
+
+        out_ds = driver.Create(
+            output_path, lidar_cols, lidar_rows, 1, lidar_dtype,
+            options=['COMPRESS=LZW', 'TILED=YES', 'BIGTIFF=IF_SAFER'],
+        )
+        if not out_ds:
+            raise RuntimeError(f'Failed to create merged output raster at: {output_path}')
+        out_ds.SetGeoTransform(lidar_gt)
+        out_ds.SetProjection(lidar_proj)
+        out_band = out_ds.GetRasterBand(1)
+        if lidar_nodata is not None:
+            out_band.SetNoDataValue(lidar_nodata)
+        out_band.WriteArray(output_array.astype(numpy_dtype))
+        out_band.FlushCache()
+        out_ds = None
+
+        diff_ds = driver.Create(
+            diff_path, lidar_cols, lidar_rows, 1, gdal.GDT_Float32,
+            options=['COMPRESS=LZW', 'TILED=YES', 'BIGTIFF=IF_SAFER'],
+        )
+        if not diff_ds:
+            raise RuntimeError(f'Failed to create difference raster at: {diff_path}')
+        diff_ds.SetGeoTransform(lidar_gt)
+        diff_ds.SetProjection(lidar_proj)
+        diff_band = diff_ds.GetRasterBand(1)
+        diff_band.SetNoDataValue(DIFF_NODATA)
+        diff_band.WriteArray(diff_array)
+        diff_band.FlushCache()
+        diff_ds = None
+
+        try:
+            os.remove(warped_path)
+            os.rmdir(tmp_dir)
+        except Exception:
+            pass
+
+        return n_valid, n_total, diff_min, diff_max
+
+    _MERGE_TIFF_HELP_HTML = (
+        '<h2>Merge TIFF</h2>'
+        '<p><b>Author:</b> Dipendra Magaju</p>'
+
+        '<h3>Purpose</h3>'
+        '<p>Creates a merged elevation raster for flood displacement analysis. Overlays the '
+        'design surface (from this tab\'s own Create TIFF) onto an existing LiDAR DEM, '
+        'modifying only the area the design covers. The output is otherwise pixel-perfect '
+        'identical to the input LiDAR, enabling a true like-for-like flood model comparison. '
+        'A difference raster (merged minus LiDAR) is also produced for quick visual QA of the '
+        'ground change.</p>'
+
+        '<h3>Methodology</h3>'
+        '<ol>'
+        '<li>Reads the LiDAR extent, resolution, CRS, nodata value, and data type</li>'
+        '<li>Reprojects and resamples the design surface to exactly match the LiDAR pixel grid</li>'
+        '<li>Copies the LiDAR array as the starting output</li>'
+        '<li>Identifies valid (non-nodata) pixels in the resampled design surface — its own '
+        'footprint, not just its bounding rectangle</li>'
+        '<li>Replaces LiDAR values with design surface values at those pixels only</li>'
+        '<li>Computes difference = merged minus LiDAR (non-zero only within the design footprint)</li>'
+        '<li>Writes the merged raster (permanent) and difference raster (temporary) to output</li>'
+        '</ol>'
+
+        '<h3>Inputs</h3>'
+        '<ul>'
+        '<li><b>Existing LiDAR Raster (Base):</b> Single-band raster DEM. Defines the output grid</li>'
+        '<li><b>Design Surface:</b> Single-band raster of the proposed ground modification (this '
+        'tab\'s own Create TIFF output, pre-selected automatically). Any extent, resolution, or '
+        'CRS — reprojection and resampling handled automatically. Nodata pixels are treated as '
+        '"no change"</li>'
+        '<li><b>Resampling Method:</b> Algorithm for resampling the design surface onto the LiDAR grid</li>'
+        '</ul>'
+
+        '<h3>Resampling Methods — Rule of Thumb</h3>'
+        '<table border="1" cellpadding="4" cellspacing="0">'
+        '<tr><th>Situation</th><th>Recommended Method</th><th>Reason</th></tr>'
+        '<tr><td>Design same resolution as LiDAR</td><td><b>Nearest Neighbour</b></td>'
+        '<td>Grids may still be offset — NN snaps without blending sharp edges</td></tr>'
+        '<tr><td>Design finer than LiDAR (e.g. 0.5 m design, 1 m LiDAR)</td><td><b>Bilinear</b></td>'
+        '<td>Smooth weighted average — best for continuous elevation downsampling</td></tr>'
+        '<tr><td>Design coarser than LiDAR (e.g. 5 m design, 1 m LiDAR)</td><td><b>Bilinear / Cubic</b></td>'
+        '<td>Bilinear is safe; Cubic gives slightly smoother results</td></tr>'
+        '<tr><td>Significant upsampling (design much coarser than LiDAR)</td><td><b>Lanczos</b></td>'
+        '<td>Highest quality sinc-based filter, best detail preservation</td></tr>'
+        '</table>'
+        '<p><i>Default (Bilinear) is a safe choice in most cases.</i></p>'
+
+        '<h3>Outputs</h3>'
+        '<ul>'
+        '<li><b>Merged Raster:</b> GeoTIFF with LZW compression. Identical grid to LiDAR. '
+        'Pixels outside the design footprint are unchanged from the LiDAR</li>'
+        '<li><b>Difference Raster (temporary):</b> Float32 GeoTIFF. Values = merged minus LiDAR, '
+        'non-zero only within the design footprint. Positive = ground raised, Negative = ground '
+        'lowered. Nodata (-9999) everywhere outside the design footprint</li>'
+        '</ul>'
+
+        '<h3>Important Notes</h3>'
+        '<ul>'
+        '<li>Both inputs must be single-band elevation rasters</li>'
+        '<li>The entire LiDAR raster is loaded into memory — ensure sufficient RAM for large datasets</li>'
+        '<li>CRS differences between inputs are handled automatically via reprojection</li>'
+        '<li>Requires GDAL and NumPy (both included with QGIS)</li>'
+        '</ul>'
+
+        '<h3>Typical flood modelling workflow</h3>'
+        '<ol>'
+        '<li>Run flood model with existing LiDAR → Base Case</li>'
+        '<li>Run flood model with merged raster → Design Case</li>'
+        '<li>Use the ICM Difference Maps tool to compare Base vs Design flood extents/depths</li>'
+        '</ol>'
+    )
+
+    def _show_merge_tiff_help(self, parent):
+        dlg = QDialog(parent)
+        dlg.setWindowTitle('Merge TIFF — Help')
+        dlg.resize(560, 540)
+        v = QVBoxLayout(dlg)
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(False)
+        browser.setHtml(self._MERGE_TIFF_HELP_HTML)
+        v.addWidget(browser, 1)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_close = QPushButton('Close')
+        btn_close.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_close)
+        v.addLayout(btn_row)
+        dlg.exec()
+
+    def _run_merge_tiff_dialog(self, surface_label, default_design_layer):
+        """Shared 'Merge TIFF' dialog for Channel Surface and Embankment
+        Surface — pick the existing LiDAR raster + the design TIFF
+        (defaults to whatever this tab's own Create TIFF last produced),
+        a resampling method, and where to save the merged raster. The
+        difference raster is loaded as a temporary layer for a quick
+        visual check, same convention as the algorithm it's ported from."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle('Merge TIFF')
+        v = QVBoxLayout(dlg)
+
+        title_row = QHBoxLayout()
+        title_lbl = QLabel(f'Merge {surface_label} Design into LiDAR')
+        title_lbl.setStyleSheet('font-weight:bold;')
+        title_row.addWidget(title_lbl, 1)
+        btn_help = QToolButton()
+        btn_help.setText('?')
+        btn_help.setFixedSize(20, 20)
+        btn_help.setToolTip('Help — what this does, outputs, and resampling method guidance')
+        btn_help.setStyleSheet(
+            'QToolButton { border: 1px solid #888; border-radius: 10px; font-weight: bold; }'
+            'QToolButton:hover { background: #E0E0E0; }'
+        )
+        btn_help.clicked.connect(lambda: self._show_merge_tiff_help(dlg))
+        title_row.addWidget(btn_help)
+        v.addLayout(title_row)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel('Existing LiDAR Raster (Base):'))
+        combo_lidar = QgsMapLayerComboBox()
+        combo_lidar.setFilters(_RASTER_FILTER)
+        combo_lidar.setAllowEmptyLayer(True)
+        combo_lidar.setCurrentIndex(0)
+        combo_lidar.wheelEvent = lambda e: e.ignore()
+        row1.addWidget(combo_lidar, 1)
+        v.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel(f'{surface_label} Design Surface:'))
+        combo_design = QgsMapLayerComboBox()
+        combo_design.setFilters(_RASTER_FILTER)
+        combo_design.setAllowEmptyLayer(True)
+        combo_design.setCurrentIndex(0)
+        combo_design.wheelEvent = lambda e: e.ignore()
+        if default_design_layer is not None:
+            try:
+                combo_design.setLayer(default_design_layer)
+            except Exception:
+                pass
+        row2.addWidget(combo_design, 1)
+        v.addLayout(row2)
+
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel('Resampling Method:'))
+        combo_resample = QComboBox()
+        combo_resample.addItems(self._MERGE_RESAMPLE_OPTIONS)
+        combo_resample.setCurrentIndex(0)
+        combo_resample.wheelEvent = lambda e: e.ignore()
+        row3.addWidget(combo_resample, 1)
+        v.addLayout(row3)
+
+        row4 = QHBoxLayout()
+        row4.addWidget(QLabel('Output Merged Raster:'))
+        edit_out = QLineEdit()
+        default_name = f'{surface_label}_Merged_' + datetime.now().strftime('%Y-%m-%d') + '.tif'
+        edit_out.setText(os.path.join(self._default_output_folder(), default_name))
+        row4.addWidget(edit_out, 1)
+        btn_browse = QPushButton('…')
+        btn_browse.setFixedWidth(28)
+
+        def _browse():
+            path, _ = QFileDialog.getSaveFileName(
+                dlg, 'Save Merged Raster', edit_out.text(),
+                'GeoTIFF (*.tif);;All Files (*)')
+            if path:
+                if not path.lower().endswith('.tif'):
+                    path += '.tif'
+                edit_out.setText(path)
+        btn_browse.clicked.connect(_browse)
+        row4.addWidget(btn_browse)
+        v.addLayout(row4)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        btn_cancel = QPushButton('Cancel')
+        btn_run = QPushButton('Run')
+        btn_run.setStyleSheet('font-weight:bold;')
+        btns.addWidget(btn_cancel)
+        btns.addWidget(btn_run)
+        v.addLayout(btns)
+        btn_cancel.clicked.connect(dlg.reject)
+
+        def _do_run():
+            lidar_layer  = combo_lidar.currentLayer()
+            design_layer = combo_design.currentLayer()
+            if lidar_layer is None:
+                QMessageBox.information(
+                    self, 'Advanced Profile Tool',
+                    'Select the existing LiDAR raster first.')
+                return
+            if design_layer is None:
+                QMessageBox.information(
+                    self, 'Advanced Profile Tool',
+                    f'Select the {surface_label.lower()} design surface first\n'
+                    '— run Create TIFF on this tab if you haven\'t yet.')
+                return
+            output_path = edit_out.text().strip()
+            if not output_path:
+                QMessageBox.information(
+                    self, 'Advanced Profile Tool',
+                    'Choose where to save the merged raster first.')
+                return
+            if not output_path.lower().endswith('.tif'):
+                output_path += '.tif'
+            try:
+                os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            except Exception as exc:
+                QMessageBox.critical(self, 'Advanced Profile Tool',
+                                      f'Could not create output folder:\n{exc}')
+                return
+            diff_path = QgsProcessingUtils.generateTempFilename(
+                f'{surface_label.lower()}_merge_difference.tif')
+            resample_idx = combo_resample.currentIndex()
+
+            btn_run.setEnabled(False)
+            QApplication.setOverrideCursor(_WAIT_CURSOR)
+            try:
+                n_valid, n_total, diff_min, diff_max = self._merge_lidar_with_design(
+                    lidar_layer, design_layer, resample_idx, output_path, diff_path)
+            except Exception as exc:
+                QApplication.restoreOverrideCursor()
+                btn_run.setEnabled(True)
+                QMessageBox.critical(self, 'Advanced Profile Tool', f'Merge TIFF failed:\n{exc}')
+                return
+            QApplication.restoreOverrideCursor()
+
+            merged_layer = QgsRasterLayer(output_path, os.path.splitext(os.path.basename(output_path))[0])
+            if merged_layer.isValid():
+                QgsProject.instance().addMapLayer(merged_layer)
+            diff_layer = QgsRasterLayer(diff_path, f'{surface_label} Merge Difference')
+            if diff_layer.isValid():
+                QgsProject.instance().addMapLayer(diff_layer)
+
+            dlg.accept()
+            pct = (100.0 * n_valid / n_total) if n_total else 0.0
+            QMessageBox.information(
+                self, 'Advanced Profile Tool',
+                f"Merged raster created: '{os.path.basename(output_path)}'.\n"
+                f'Design surface covers {n_valid:,} of {n_total:,} pixels ({pct:.2f}%).\n'
+                f'Difference range within design footprint: {diff_min:.3f} m to {diff_max:.3f} m.')
+
+        btn_run.clicked.connect(_do_run)
+        dlg.exec()
 
     def _on_terrain_invert_levels_changed(self):
         self._terrain_us_level = self.spin_terrain_us_level.value()
@@ -10908,6 +11537,7 @@ class NormalProfileDock(QDockWidget):
         # dock jumps tabs on its own, per explicit request that the user
         # drive that themselves.
         self.tabs_embank_workflow = QTabWidget()
+        self.tabs_embank_workflow.setStyleSheet(_style.SUBTAB_STYLE)
         tab_a = QWidget(); la = QVBoxLayout(tab_a)
         la.setContentsMargins(4, 6, 4, 4); la.setSpacing(3)
         lh = la   # Horizontal Alignment content below goes into the shared tab
@@ -10956,8 +11586,21 @@ class NormalProfileDock(QDockWidget):
             'Right-click or double-click to finish.\n'
             'Ctrl+Z to undo the last vertex.'
         )
+        self.btn_embank_draw.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_embank_draw.clicked.connect(self._toggle_embank_digitizing)
         fillet_row.addWidget(self.btn_embank_draw)
+
+        self.btn_embank_import = QPushButton('Import Line')
+        self.btn_embank_import.setToolTip(
+            'Import an existing line (shapefile or GeoPackage) as the\n'
+            'horizontal alignment, instead of drawing one by hand.\n'
+            'Only the first feature in the file is used. Vertex editing,\n'
+            'fillets, etc. all work exactly the same afterwards as a\n'
+            'hand-drawn line.'
+        )
+        self.btn_embank_import.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
+        self.btn_embank_import.clicked.connect(self._on_embank_import_line)
+        fillet_row.addWidget(self.btn_embank_import)
 
         # One-click fix for the 'radius tighter than the embankment's own
         # half-width' problem (see _embank_check_tight_bends, surfaced
@@ -11314,6 +11957,7 @@ class NormalProfileDock(QDockWidget):
         # row is currently selected, and a Copy to Other Half button.
         self._embank_xs_side_ui = {'left': None, 'right': None}
         self.tabs_embank_xs_side = QTabWidget()
+        self.tabs_embank_xs_side.setStyleSheet(_style.SUBTAB_STYLE)
         self.tabs_embank_xs_side.addTab(self._build_embank_xs_side_tab('left'), 'Left Half')
         self.tabs_embank_xs_side.addTab(self._build_embank_xs_side_tab('right'), 'Right Half')
         # Belt-and-braces: force a fresh rebuild of whichever side's rows
@@ -11538,6 +12182,9 @@ class NormalProfileDock(QDockWidget):
                 self.canvas.unsetMapTool(self._embank_map_tool)
             if self._prev_tool:
                 self.canvas.setMapTool(self._prev_tool)
+
+    def _on_embank_import_line(self):
+        self._import_alignment_line('Embankment', self._on_embank_line_captured)
 
     def _on_embank_line_captured(self, geom):
         if geom.isMultipart():
@@ -11794,6 +12441,9 @@ class NormalProfileDock(QDockWidget):
         self._ch_cursors         = []
         self._ch_cursor_artists  = []
         self._clear_cursor_map_points()
+        self._profile_markers        = []
+        self._profile_marker_artists = []
+        self._clear_marker_map_points()
         self._hide_hover()
         self._embank_vertex_radii = {}
         self._embank_selected_vertex = None
@@ -15022,13 +15672,11 @@ class NormalProfileDock(QDockWidget):
         return layer
 
     def _on_embank_merge_tiff(self):
-        """Placeholder — will paste a previously created channel-design
-        TIFF into a copy of the existing ground DEM, replacing only the
-        corridor's own footprint (same idea as a GIS/CAD 'paste surface'),
-        once Create TIFF exists to produce one."""
-        QMessageBox.information(
-            self, 'Advanced Profile Tool',
-            'Merge TIFF is not implemented yet — coming soon.')
+        """Pastes a previously created embankment-design TIFF into a copy
+        of an existing LiDAR/ground raster, replacing only the
+        embankment's own footprint (same idea as a GIS/CAD 'paste
+        surface'). See _run_merge_tiff_dialog / _merge_lidar_with_design."""
+        self._run_merge_tiff_dialog('Embankment', self._embank_last_tiff_layer)
 
     def _on_embank_invert_levels_changed(self):
         self._embank_us_level = self.spin_embank_us_level.value()
@@ -15718,6 +16366,30 @@ class NormalProfileDock(QDockWidget):
         del writer
         return path
 
+    def _write_markers_shp(self, folder, prefix):
+        """Writes every point placed with the Marker sketch tool to its
+        own 'marker' shapefile — one point feature per marker, in the
+        project's CRS (the markers' own stored QgsPointXY values are
+        already in that CRS — interpolated from self.profile_geom, which
+        is itself in the project CRS)."""
+        path = os.path.join(folder, f'{prefix}_marker.shp')
+        fields = QgsFields()
+        fields.append(QgsField('name', QVariant.String, len=50))
+        fields.append(QgsField('chainage', QVariant.Double))
+        writer = QgsVectorFileWriter(
+            path, 'UTF-8', fields,
+            QgsWkbTypes.Point,
+            QgsProject.instance().crs(),
+            'ESRI Shapefile'
+        )
+        for m in self._profile_markers:
+            feat = QgsFeature(fields)
+            feat.setGeometry(QgsGeometry.fromPointXY(m['point']))
+            feat.setAttributes([m.get('name', ''), m.get('chainage', 0.0)])
+            writer.addFeature(feat)
+        del writer
+        return path
+
     def _save_plot(self):
         if not MATPLOTLIB_AVAILABLE:
             return
@@ -15743,6 +16415,11 @@ class NormalProfileDock(QDockWidget):
                 saved.append(f'Line:      {self._write_profile_shp(folder, prefix)}')
             except Exception as exc:
                 errors.append(f'SHP failed: {exc}')
+        if self._profile_markers:
+            try:
+                saved.append(f'Markers:   {self._write_markers_shp(folder, prefix)}')
+            except Exception as exc:
+                errors.append(f'Marker SHP failed: {exc}')
         self.lbl_status.setText(f'Results saved to: {folder}')
         msg = '\n'.join(saved)
         if errors:
@@ -16501,6 +17178,7 @@ class NormalProfileDock(QDockWidget):
         self._do_tight_layout()
         self._sketch_restore(_sketch_save)
         self._refresh_chainage_cursors()
+        self._refresh_profile_markers()
         # Sync cut/fill state to any open cross-section dialogs
         for _xsd in list(self._xs_dialogs):
             try:
