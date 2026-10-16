@@ -1818,9 +1818,11 @@ class NormalProfileDock(QDockWidget):
             'Right-click or double-click to finish.\n'
             'Ctrl+Z to undo the last vertex.'
         )
+        self.btn_draw.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_draw.clicked.connect(self._toggle_digitizing)
         self.btn_clear = QPushButton('Clear')
         self.btn_clear.setFixedWidth(50)
+        self.btn_clear.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_clear.clicked.connect(self._clear_line)
 
         self.btn_run = QPushButton('Refresh')
@@ -1850,6 +1852,7 @@ class NormalProfileDock(QDockWidget):
             'Close) asks for a folder name under the Result Folder path\n'
             'below; after that, Save just re-saves into the same folder.'
         )
+        self.btn_terrain_project_save.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_terrain_project_save.clicked.connect(self._on_terrain_project_save)
         self.btn_terrain_project_save.setVisible(False)   # idx 0 (Layer Profile) is the default tab
 
@@ -1858,6 +1861,7 @@ class NormalProfileDock(QDockWidget):
             'Open a previously saved channel design folder, replacing the\n'
             'current one on this tab.'
         )
+        self.btn_terrain_project_open.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_terrain_project_open.clicked.connect(self._on_terrain_project_open)
         self.btn_terrain_project_open.setVisible(False)   # idx 0 (Layer Profile) is the default tab
 
@@ -1868,6 +1872,7 @@ class NormalProfileDock(QDockWidget):
             '(same as Clear) and forgets which folder was open, so the\n'
             'next Save asks for a new name.'
         )
+        self.btn_terrain_project_close.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_terrain_project_close.clicked.connect(self._on_terrain_project_close)
         self.btn_terrain_project_close.setVisible(False)   # idx 0 (Layer Profile) is the default tab
 
@@ -1906,6 +1911,7 @@ class NormalProfileDock(QDockWidget):
             'Close) asks for a folder name under the Result Folder path\n'
             'below; after that, Save just re-saves into the same folder.'
         )
+        self.btn_embank_project_save.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_embank_project_save.clicked.connect(self._on_embank_project_save)
         self.btn_embank_project_save.setVisible(False)
 
@@ -1914,6 +1920,7 @@ class NormalProfileDock(QDockWidget):
             'Open a previously saved embankment design folder, replacing\n'
             'the current one on this tab.'
         )
+        self.btn_embank_project_open.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_embank_project_open.clicked.connect(self._on_embank_project_open)
         self.btn_embank_project_open.setVisible(False)
 
@@ -1924,6 +1931,7 @@ class NormalProfileDock(QDockWidget):
             'blank (same as Clear) and forgets which folder was open, so\n'
             'the next Save asks for a new name.'
         )
+        self.btn_embank_project_close.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_embank_project_close.clicked.connect(self._on_embank_project_close)
         self.btn_embank_project_close.setVisible(False)
 
@@ -1955,6 +1963,7 @@ class NormalProfileDock(QDockWidget):
             "Builds a standalone GeoTIFF of this shape's surface only\n"
             '(not merged into the existing DEM).'
         )
+        self.btn_shapes_create_tiff.setStyleSheet(_style.PRIMARY_BUTTON_STYLE)
         self.btn_shapes_create_tiff.clicked.connect(self._on_shapes_create_tiff)
         self.btn_shapes_create_tiff.setVisible(False)
 
@@ -2002,6 +2011,7 @@ class NormalProfileDock(QDockWidget):
         btn_use_layer = QPushButton('Use')
         btn_use_layer.setFixedWidth(42)
         btn_use_layer.setToolTip('Load the line from the selected layer as the profile line')
+        btn_use_layer.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         btn_use_layer.clicked.connect(self._use_line_layer)
         ll.addWidget(btn_use_layer)
 
@@ -2075,6 +2085,7 @@ class NormalProfileDock(QDockWidget):
         self.csv_edit.setPlaceholderText('Leave blank to auto-save to Downloads/ProfilePlot_<Date>')
         btn_csv = QPushButton('...')
         btn_csv.setFixedWidth(28)
+        btn_csv.setStyleSheet(_style.BROWSE_BUTTON_STYLE)
         btn_csv.clicked.connect(self._browse_result_folder)
         cr.addWidget(self.csv_edit); cr.addWidget(btn_csv)
         outer.addLayout(cr)
@@ -4059,6 +4070,9 @@ class NormalProfileDock(QDockWidget):
         self._sketch_objects.clear()
         self._sketch_current  = None
         self._sketch_pressed  = False
+        self._profile_markers = []
+        self._clear_marker_map_points()
+        self._refresh_profile_markers()
         if MATPLOTLIB_AVAILABLE:
             self.canvas_plot.draw_idle()
 
@@ -4961,8 +4975,24 @@ class NormalProfileDock(QDockWidget):
             ax_idx = all_p.index(ax) if ax in all_p else 0
             name = f'M-{len(self._profile_markers) + 1:03d}'
             pt = self.profile_geom.interpolate(fx).asPoint()
+            # Snap the dot onto whichever plotted line on this axis is
+            # nearest the click, rather than using the raw click height —
+            # otherwise it floats at wherever the mouse happened to land.
+            snap_y = fy
+            if self._profile_chainages:
+                best = None
+                for col in self._plot_cols_per_ax.get(ax_idx, []):
+                    vals = self._profile_data_store.get(col)
+                    if not vals:
+                        continue
+                    clean = [v if v is not None else float('nan') for v in vals]
+                    yv = float(np.interp(fx, self._profile_chainages, clean))
+                    if np.isfinite(yv) and (best is None or abs(yv - fy) < abs(best - fy)):
+                        best = yv
+                if best is not None:
+                    snap_y = best
             self._profile_markers.append({
-                'chainage': fx, 'y': fy, 'ax_idx': ax_idx,
+                'chainage': fx, 'y': snap_y, 'ax_idx': ax_idx,
                 'point': pt, 'name': name,
             })
             self._add_marker_map_point(pt)
@@ -6670,11 +6700,13 @@ class NormalProfileDock(QDockWidget):
             'remove it. Break points and control sections stay attached\n'
             'to the same real-world spot as the alignment changes shape.'
         )
+        self.btn_terrain_vertex_edit.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_terrain_vertex_edit.clicked.connect(self._toggle_terrain_vertex_edit)
         fillet_row.addWidget(self.btn_terrain_vertex_edit)
 
         self.btn_terrain_vertex_reset = QPushButton('Reset')
         self.btn_terrain_vertex_reset.setFixedWidth(48)
+        self.btn_terrain_vertex_reset.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_terrain_vertex_reset.setToolTip("Clear this vertex's override — use the default radius again")
         self.btn_terrain_vertex_reset.clicked.connect(self._on_terrain_vertex_reset)
         self.btn_terrain_vertex_reset.setVisible(False)
@@ -10674,7 +10706,7 @@ class NormalProfileDock(QDockWidget):
 
         '<h3>Inputs</h3>'
         '<ul>'
-        '<li><b>Existing LiDAR Raster (Base):</b> Single-band raster DEM. Defines the output grid</li>'
+        '<li><b>Base Surface:</b> Single-band raster DEM (existing LiDAR). Defines the output grid</li>'
         '<li><b>Design Surface:</b> Single-band raster of the proposed ground modification (this '
         'tab\'s own Create TIFF output, pre-selected automatically). Any extent, resolution, or '
         'CRS — reprojection and resampling handled automatically. Nodata pixels are treated as '
@@ -10750,7 +10782,7 @@ class NormalProfileDock(QDockWidget):
         v = QVBoxLayout(dlg)
 
         title_row = QHBoxLayout()
-        title_lbl = QLabel(f'Merge {surface_label} Design into LiDAR')
+        title_lbl = QLabel(f'Merge {surface_label} Surface')
         title_lbl.setStyleSheet('font-weight:bold;')
         title_row.addWidget(title_lbl, 1)
         btn_help = QToolButton()
@@ -10766,7 +10798,7 @@ class NormalProfileDock(QDockWidget):
         v.addLayout(title_row)
 
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel('Existing LiDAR Raster (Base):'))
+        row1.addWidget(QLabel('Base Surface:'))
         combo_lidar = QgsMapLayerComboBox()
         combo_lidar.setFilters(_RASTER_FILTER)
         combo_lidar.setAllowEmptyLayer(True)
@@ -10807,6 +10839,7 @@ class NormalProfileDock(QDockWidget):
         row4.addWidget(edit_out, 1)
         btn_browse = QPushButton('…')
         btn_browse.setFixedWidth(28)
+        btn_browse.setStyleSheet(_style.BROWSE_BUTTON_STYLE)
 
         def _browse():
             path, _ = QFileDialog.getSaveFileName(
@@ -11637,11 +11670,13 @@ class NormalProfileDock(QDockWidget):
             'remove it. Break points and control sections stay attached\n'
             'to the same real-world spot as the alignment changes shape.'
         )
+        self.btn_embank_vertex_edit.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_embank_vertex_edit.clicked.connect(self._toggle_embank_vertex_edit)
         fillet_row.addWidget(self.btn_embank_vertex_edit)
 
         self.btn_embank_vertex_reset = QPushButton('Reset')
         self.btn_embank_vertex_reset.setFixedWidth(48)
+        self.btn_embank_vertex_reset.setStyleSheet(_style.SECONDARY_BUTTON_STYLE)
         self.btn_embank_vertex_reset.setToolTip("Clear this vertex's override — use the default radius again")
         self.btn_embank_vertex_reset.clicked.connect(self._on_embank_vertex_reset)
         self.btn_embank_vertex_reset.setVisible(False)

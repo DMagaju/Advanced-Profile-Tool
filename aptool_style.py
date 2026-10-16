@@ -73,24 +73,31 @@ WIDGET_STYLE = f"""
     }}
 """
 
-# ── Tab bar styling — apply to any top-level QTabWidget
+# ── Tab bar styling — apply to any top-level QTabWidget. Matches Auckland
+# Catchment Hydrology's tab look: individual grey pill buttons sitting on a
+# navy strip, with the active tab picked out in solid blue + bold white text
+# (see AucklandCatchmentHydrology/dock.py's _BTN_ACTIVE/_BTN_INACTIVE).
 TAB_STYLE = f"""
     QTabWidget::pane {{ border: none; background: {BODY_BG}; }}
+    QTabBar {{ background: {NAV}; }}
     QTabBar::tab {{
-        background: {NAV};
-        color: rgba(255,255,255,0.75);
-        padding: 6px 12px;
+        background: #CFD8DC;
+        color: #37474F;
+        border: 1px solid #90A4AE;
+        border-radius: 3px;
+        padding: 4px 10px;
+        margin: 3px 2px;
         font-size: 11px;
-        font-weight: bold;
-        border: none;
+        font-weight: normal;
     }}
     QTabBar::tab:selected {{
         background: {BLUE};
         color: white;
+        border: 1px solid #0D47A1;
+        font-weight: bold;
     }}
     QTabBar::tab:hover:!selected {{
-        background: #283593;
-        color: white;
+        background: #B0BEC5;
     }}
 """
 
@@ -103,11 +110,21 @@ SUBTAB_STYLE = f"""
         font-size: 10px;
         background: #ECEFF1;
         color: #37474F;
+        border: 1px solid {BORDER};
+        border-bottom: none;
+        border-top-left-radius: 3px;
+        border-top-right-radius: 3px;
+        margin-right: 1px;
+    }}
+    QTabBar::tab:hover:!selected {{
+        background: #CFD8DC;
     }}
     QTabBar::tab:selected {{
         background: {BLUE};
         color: white;
         font-weight: bold;
+        border: 1px solid #0D47A1;
+        border-bottom: none;
     }}
 """
 
@@ -122,11 +139,24 @@ PRIMARY_BUTTON_STYLE = (
 )
 
 SECONDARY_BUTTON_STYLE = (
-    'QPushButton { background: #ECEFF1; color: #37474F; border: none;'
-    '  border-radius: 4px; padding: 6px 12px; font-size: 11px; font-weight: bold; }'
-    'QPushButton:hover    { background: #CFD8DC; }'
-    'QPushButton:pressed  { background: #B0BEC5; }'
-    'QPushButton:checkable:checked { background: #90A4AE; color: white; }'
+    f'QPushButton {{ background: #ECEFF1; color: #37474F; border: 1px solid {BORDER};'
+    f'  border-radius: 4px; padding: 5px 12px; font-size: 11px; font-weight: bold; }}'
+    f'QPushButton:hover    {{ background: #CFD8DC; }}'
+    f'QPushButton:pressed  {{ background: #B0BEC5; }}'
+    f'QPushButton:checkable:checked {{ background: #90A4AE; color: white; border: 1px solid #78909C; }}'
+)
+
+# "..." browse buttons — folder/file pickers sitting next to a QLineEdit
+# path field (Result Folder, Merge TIFF's output path, etc.). Explicit
+# style rather than relying on native OS button rendering, so it can't
+# end up looking like anything else (e.g. a colour swatch) regardless of
+# theme/OS, and so every new one this plugin adds stays visually
+# consistent automatically.
+BROWSE_BUTTON_STYLE = (
+    f'QPushButton {{ background: white; color: #37474F;'
+    f'  border: 1px solid {BORDER}; border-radius: 3px; font-size: 11px; }}'
+    f'QPushButton:hover   {{ background: #ECEFF1; }}'
+    f'QPushButton:pressed {{ background: #CFD8DC; }}'
 )
 
 
