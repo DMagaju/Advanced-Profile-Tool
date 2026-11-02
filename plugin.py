@@ -744,6 +744,83 @@ class FlowLayout(QLayout):
 
 
 # ---------------------------------------------------------------------------
+# Geographic project CRS handling
+# ---------------------------------------------------------------------------
+#
+# All of this tool's chainage/length math (line_geom.length(),
+# line_geom.interpolate(distance), vertex-at-chainage lookups, fillet
+# anchors, …) treats the drawn alignment's own coordinates as plain
+# Cartesian metres — correct whenever the project CRS is a projected
+# metric one, meaningless (degrees) when it's geographic (e.g. a
+# straight WGS84 load of an SRTM DEM). Rather than touch every one of
+# those call sites, each tab offers to switch the PROJECT CRS itself
+# to the correct local UTM zone the moment it matters (running that
+# tab while the project CRS is still geographic) — after that, the
+# existing metric math is already correct, unchanged, exactly as it is
+# today for any other projected CRS. QGIS keeps reprojecting every
+# layer (including a geographic DEM) on the fly for display; the user
+# can switch the project CRS back from the status bar at any time.
+#
+# Changing project.setCrs() does NOT retroactively reproject anything
+# already drawn — a QgsGeometry carries no CRS of its own, so the
+# alignment's existing raw coordinates would silently keep meaning
+# "degrees" while every length()/interpolate() call started treating
+# them as "metres", corrupting both its real-world location and shape.
+# So switching the CRS always goes together with transforming whatever
+# that tab's own alignment state is — see _migrate_profile_line_to_
+# metric_crs/_migrate_terrain_to_metric_crs/_migrate_embank_to_metric_
+# crs below, one per tab since each tracks that state differently
+# (plain digitised line vs. a filleted alignment with chainage-based
+# break/control-section anchors).
+
+def _utm_crs_for_point(lon, lat):
+    """EPSG code for the UTM zone containing (lon, lat) — WGS84-based
+    (326xx north / 327xx south), which is accurate enough for chainage
+    purposes over the kind of alignment lengths this tool is used for
+    (roads/channels/embankments, not hemisphere-spanning lines)."""
+    zone = int((lon + 180.0) / 6.0) % 60 + 1
+    epsg = (32600 if lat >= 0 else 32700) + zone
+    return QgsCoordinateReferenceSystem(f'EPSG:{epsg}')
+
+
+def _confirm_metric_crs_switch(parent, source_crs, reference_geom):
+    """Asks whether to switch the project CRS to the UTM zone that fits
+    `reference_geom` (its centroid picks the zone). Returns the chosen
+    QgsCoordinateReferenceSystem if the user agreed, else None — doesn't
+    touch the project or any geometry itself; the caller still has to
+    do the actual migration (see module docstring above)."""
+    if reference_geom is None or reference_geom.isEmpty():
+        QMessageBox.critical(parent, 'Advanced Profile Tool — CRS Error',
+            'Project CRS is Geographic (degrees), and a metric CRS could '
+            "not be worked out automatically.\nSwitch to a Projected "
+            'Metric CRS first.')
+        return None
+
+    centroid = reference_geom.centroid().asPoint()
+    utm_crs = _utm_crs_for_point(centroid.x(), centroid.y())
+    if not utm_crs.isValid():
+        QMessageBox.critical(parent, 'Advanced Profile Tool — CRS Error',
+            'Project CRS is Geographic (degrees), and a metric CRS could '
+            "not be worked out automatically.\nSwitch to a Projected "
+            'Metric CRS first.')
+        return None
+
+    reply = QMessageBox.question(
+        parent, 'Advanced Profile Tool — Geographic Project CRS',
+        f"The project CRS is geographic ({source_crs.authid() or source_crs.description()}), "
+        'so distances would be measured in degrees, not metres.\n\n'
+        f'Switch the project CRS to {utm_crs.authid()} '
+        f'({utm_crs.description()}) and reproject the drawn alignment '
+        'into it, so chainage and length are measured correctly?\n\n'
+        'Every layer — including a geographic DEM like SRTM — keeps '
+        'displaying normally; QGIS reprojects it on the fly. You can '
+        'switch the project CRS back at any time from the status bar '
+        '(the alignment stays where it is on the ground).',
+        _MB_YES | _MB_NO, _MB_YES)
+    return utm_crs if reply == _MB_YES else None
+
+
+# ---------------------------------------------------------------------------
 # Dock widget
 # ---------------------------------------------------------------------------
 
@@ -8196,6 +8273,36 @@ class NormalProfileDock(QDockWidget):
         if self._terrain_geom is not None:
             self._refresh_terrain_profile()
 
+    def _migrate_terrain_to_metric_crs(self):
+        """Channel Surface tab: the alignment is self._terrain_raw_pts
+        (fillets/chainage recomputed from it), plus break-point/control-
+        section anchors that are chainage values tied to real-world
+        positions on self._terrain_geom. Switching CRS means transforming
+        all three — the raw vertices, AND each anchor's captured
+        real-world point (so _terrain_reproject_chainage_anchors snaps
+        it back to the right chainage on the now-reprojected geometry,
+        not a meaningless lineLocatePoint() against mismatched CRSs).
+        Returns True once the project CRS is (or now is) projected,
+        False if the user declined."""
+        project = QgsProject.instance()
+        source_crs = project.crs()
+        if not source_crs.isGeographic():
+            return True
+        utm_crs = _confirm_metric_crs_switch(self, source_crs, self._terrain_geom)
+        if utm_crs is None:
+            return False
+        xform = QgsCoordinateTransform(source_crs, utm_crs, project)
+        anchors = [(d, QgsPointXY(xform.transform(pt)))
+                   for d, pt in self._terrain_capture_chainage_anchors()]
+        self._terrain_raw_pts = [QgsPointXY(xform.transform(p)) for p in self._terrain_raw_pts]
+        project.setCrs(utm_crs)
+        self._terrain_reproject_chainage_anchors(anchors, self._terrain_refillet_geom())
+        self._rebuild_terrain_alignment()
+        self._update_terrain_fillet_ui()
+        if self._terrain_vertex_tool is not None:
+            self._terrain_vertex_tool.set_vertices(self._terrain_raw_pts)
+        return True
+
     def _refresh_terrain_profile(self):
         if self._terrain_geom is None:
             QMessageBox.warning(self, 'Advanced Profile Tool', 'Draw a channel alignment first.')
@@ -8209,10 +8316,7 @@ class NormalProfileDock(QDockWidget):
                 self._reset_axes()
                 self._draw_terrain_vertical_decorations()
             return
-        if QgsProject.instance().crs().isGeographic():
-            QMessageBox.critical(self, 'Advanced Profile Tool — CRS Error',
-                'Project CRS is Geographic (degrees).\n'
-                'Switch to a Projected Metric CRS first.')
+        if not self._migrate_terrain_to_metric_crs():
             return
         self.btn_run.setEnabled(False)
         self.progress.setRange(0, 0)
@@ -13174,6 +13278,31 @@ class NormalProfileDock(QDockWidget):
             band.setToGeometry(QgsGeometry.fromPolylineXY(line), None)
             setattr(self, attr, band)
 
+    def _migrate_embank_to_metric_crs(self):
+        """Embankment Surface tab — mirrors _migrate_terrain_to_metric_crs
+        exactly, for self._embank_raw_pts / self._embank_geom's own
+        break-point/control-section anchors. Returns True once the
+        project CRS is (or now is) projected, False if the user
+        declined."""
+        project = QgsProject.instance()
+        source_crs = project.crs()
+        if not source_crs.isGeographic():
+            return True
+        utm_crs = _confirm_metric_crs_switch(self, source_crs, self._embank_geom)
+        if utm_crs is None:
+            return False
+        xform = QgsCoordinateTransform(source_crs, utm_crs, project)
+        anchors = [(d, QgsPointXY(xform.transform(pt)))
+                   for d, pt in self._embank_capture_chainage_anchors()]
+        self._embank_raw_pts = [QgsPointXY(xform.transform(p)) for p in self._embank_raw_pts]
+        project.setCrs(utm_crs)
+        self._embank_reproject_chainage_anchors(anchors, self._embank_refillet_geom())
+        self._rebuild_embank_alignment()
+        self._update_embank_fillet_ui()
+        if self._embank_vertex_tool is not None:
+            self._embank_vertex_tool.set_vertices(self._embank_raw_pts)
+        return True
+
     def _refresh_embank_profile(self):
         if self._embank_geom is None:
             QMessageBox.warning(self, 'Advanced Profile Tool', 'Draw a channel alignment first.')
@@ -13187,10 +13316,7 @@ class NormalProfileDock(QDockWidget):
                 self._reset_axes()
                 self._draw_embank_vertical_decorations()
             return
-        if QgsProject.instance().crs().isGeographic():
-            QMessageBox.critical(self, 'Advanced Profile Tool — CRS Error',
-                'Project CRS is Geographic (degrees).\n'
-                'Switch to a Projected Metric CRS first.')
+        if not self._migrate_embank_to_metric_crs():
             return
         self.btn_run.setEnabled(False)
         self.progress.setRange(0, 0)
@@ -16461,6 +16587,24 @@ class NormalProfileDock(QDockWidget):
             msg += '\n\nErrors:\n' + '\n'.join(errors)
         QMessageBox.information(self, 'Results Saved', msg)
 
+    def _migrate_profile_line_to_metric_crs(self):
+        """Plain Profile tab: no fillets/anchors to carry across, just the
+        digitised line itself. Returns True once the project CRS is (or
+        now is) projected, False if the user declined the switch."""
+        project = QgsProject.instance()
+        source_crs = project.crs()
+        if not source_crs.isGeographic():
+            return True
+        utm_crs = _confirm_metric_crs_switch(self, source_crs, self.profile_geom)
+        if utm_crs is None:
+            return False
+        xform = QgsCoordinateTransform(source_crs, utm_crs, project)
+        geom = QgsGeometry(self.profile_geom)
+        geom.transform(xform)
+        project.setCrs(utm_crs)
+        self._on_line_captured(geom)
+        return True
+
     def _run(self):
         if self._active_tab == _TAB_EMBANK:
             self._refresh_embank_profile()
@@ -16476,10 +16620,7 @@ class NormalProfileDock(QDockWidget):
             QMessageBox.warning(self, 'Advanced Profile Tool',
                 'No layers selected. Check at least one raster or add a vector Z-field.')
             return
-        if QgsProject.instance().crs().isGeographic():
-            QMessageBox.critical(self, 'Advanced Profile Tool — CRS Error',
-                'Project CRS is Geographic (degrees).\n'
-                'Switch to a Projected Metric CRS first.')
+        if not self._migrate_profile_line_to_metric_crs():
             return
         self.btn_run.setEnabled(False)
         self.progress.setRange(0, 0)  # indeterminate while extracting
@@ -16532,12 +16673,41 @@ class NormalProfileDock(QDockWidget):
 
         n = len(chainages); data = {}
 
+        # `pts`/`profile_bbox` below are in the project CRS (line_geom's own
+        # CRS). A raster or vector layer sampled here doesn't have to share
+        # that CRS — _in_layer_crs() reprojects both into whichever CRS a
+        # given layer actually uses, caching each distinct target CRS's
+        # result so a project with several layers in the same CRS (the
+        # common case) only pays for one transform, not one per layer.
+        source_crs = QgsProject.instance().crs()
+        profile_bbox = line_geom.boundingBox()
+        _crs_pt_cache = {}
+
+        def _in_layer_crs(layer_crs):
+            key = layer_crs.authid() or layer_crs.toWkt()
+            cached = _crs_pt_cache.get(key)
+            if cached is not None:
+                return cached
+            if not layer_crs.isValid() or layer_crs == source_crs:
+                result = (pts, profile_bbox)
+            else:
+                try:
+                    xform = QgsCoordinateTransform(source_crs, layer_crs, QgsProject.instance())
+                    t_pts = [QgsPointXY(xform.transform(p)) for p in pts]
+                    t_bbox = xform.transformBoundingBox(profile_bbox)
+                    result = (t_pts, t_bbox)
+                except Exception:
+                    result = (pts, profile_bbox)
+            _crs_pt_cache[key] = result
+            return result
+
         for rl, col_name in raster_entries:
             provider = rl.dataProvider()
+            layer_pts, _ = _in_layer_crs(rl.crs())
             nodata = (provider.sourceNoDataValue(1)
                       if provider.sourceHasNoDataValue(1) else None)
             vals = []
-            for i, pt in enumerate(pts):
+            for i, pt in enumerate(layer_pts):
                 if i % 500 == 0: QApplication.processEvents()
                 try:
                     v, ok = provider.sample(pt, 1)
@@ -16553,22 +16723,22 @@ class NormalProfileDock(QDockWidget):
         for vl, field, col_name in vector_entries:
             lyr_fields[vl.id()].append((field, col_name)); lyr_obj[vl.id()] = vl
 
-        # Pre-compute all profile points as a single numpy array (reused per layer)
-        pts_xy = (np.array([(pt.x(), pt.y()) for pt in pts], dtype=float)
-                  if (MATPLOTLIB_AVAILABLE and _mpath is not None and n > 0 and lyr_fields)
-                  else None)
-
-        # Bounding box of the entire profile line — used to pre-filter features at
-        # the provider level before they reach Python (huge saving for large datasets).
-        profile_bbox = line_geom.boundingBox()
-
         for lid, field_pairs in lyr_fields.items():
             vl = lyr_obj[lid]
+            layer_pts, layer_bbox = _in_layer_crs(vl.crs())
+
+            # Per-layer profile points as a single numpy array (reused by the
+            # polygon/point fast paths below) — rebuilt per layer since each
+            # one may sit in its own CRS (see _in_layer_crs() above).
+            pts_xy = (np.array([(pt.x(), pt.y()) for pt in layer_pts], dtype=float)
+                      if (MATPLOTLIB_AVAILABLE and _mpath is not None and n > 0)
+                      else None)
+
             field_indices = [vl.fields().indexOf(f) for f, _ in field_pairs
                              if vl.fields().indexOf(f) >= 0]
             req = (QgsFeatureRequest()
                    .setSubsetOfAttributes(field_indices)
-                   .setFilterRect(profile_bbox))
+                   .setFilterRect(layer_bbox))
             vals_map = {col_name: [None] * n for _, col_name in field_pairs}
 
             geom_type_int = vl.geometryType()
@@ -16646,7 +16816,7 @@ class NormalProfileDock(QDockWidget):
                 # that geometrically contains point P, its bounding box also
                 # contains P, so the spatial index always returns it.
                 # No search-radius estimate needed — no overcounting risk.
-                for i, pt in enumerate(pts):
+                for i, pt in enumerate(layer_pts):
                     if i % 500 == 0:
                         QApplication.processEvents()
                     x, y  = pt.x(), pt.y()
@@ -16708,7 +16878,7 @@ class NormalProfileDock(QDockWidget):
                 for f in vl.getFeatures(req):
                     feat_map[f.id()] = f
                     sp_idx.insertFeature(f)
-                for i, pt in enumerate(pts):
+                for i, pt in enumerate(layer_pts):
                     if i % 500 == 0:
                         QApplication.processEvents()
                     x, y  = pt.x(), pt.y()
