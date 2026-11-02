@@ -743,6 +743,47 @@ class FlowLayout(QLayout):
         return y + line_height - rect.y() + m.bottom()
 
 
+def _utm_crs_for_point(lon, lat):
+    """EPSG code for the UTM zone containing (lon, lat) — WGS84-based
+    (326xx north / 327xx south); used only to suggest a sensible target
+    CRS to the user, who still does the actual reprojection themselves."""
+    zone = int((lon + 180.0) / 6.0) % 60 + 1
+    epsg = (32600 if lat >= 0 else 32700) + zone
+    return QgsCoordinateReferenceSystem(f'EPSG:{epsg}')
+
+
+def _check_raster_layers_geographic(parent, raster_entries):
+    """Returns True (after showing a blocking error) if any raster layer
+    in `raster_entries` is itself in a Geographic CRS (e.g. an SRTM DEM
+    left in WGS84) — this tool needs every raster/vector layer in a
+    Projected Metric CRS to measure distances and sample correctly, so
+    rather than silently reprojecting on the fly, it tells the user
+    which layer(s) need fixing and suggests the UTM zone that fits."""
+    geographic_layers = [rl for rl, _col in raster_entries if rl.crs().isGeographic()]
+    if not geographic_layers:
+        return False
+
+    lines = []
+    for rl in geographic_layers:
+        crs = rl.crs()
+        centroid = rl.extent().center()
+        utm_crs = _utm_crs_for_point(centroid.x(), centroid.y())
+        suggestion = (f'{utm_crs.authid()} ({utm_crs.description()})'
+                      if utm_crs.isValid() else 'a Projected Metric CRS for your area')
+        lines.append(f"• '{rl.name()}' — {crs.authid() or crs.description()} "
+                      f'(degrees). Suggested target CRS: {suggestion}.')
+
+    QMessageBox.critical(parent, 'Advanced Profile Tool — Geographic Raster Layer',
+        'The following raster layer(s) are in a Geographic CRS (degrees), '
+        'not a Projected Metric CRS — chainage, length and sampling need a '
+        'metric CRS to be correct:\n\n' + '\n\n'.join(lines) +
+        '\n\nReproject the DEM first, then reload it into this tool:\n'
+        'QGIS menu: Raster → Projections → Warp (Reproject)…\n'
+        '(or Processing Toolbox → "Warp (reproject)"), setting '
+        'Target CRS to the suggested EPSG code above.')
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Dock widget
 # ---------------------------------------------------------------------------
@@ -8214,6 +8255,8 @@ class NormalProfileDock(QDockWidget):
                 'Project CRS is Geographic (degrees).\n'
                 'Switch to a Projected Metric CRS first.')
             return
+        if _check_raster_layers_geographic(self, raster_entries):
+            return
         self.btn_run.setEnabled(False)
         self.progress.setRange(0, 0)
         self.lbl_status.setText('Refreshing…')
@@ -13192,6 +13235,8 @@ class NormalProfileDock(QDockWidget):
                 'Project CRS is Geographic (degrees).\n'
                 'Switch to a Projected Metric CRS first.')
             return
+        if _check_raster_layers_geographic(self, raster_entries):
+            return
         self.btn_run.setEnabled(False)
         self.progress.setRange(0, 0)
         self.lbl_status.setText('Refreshing…')
@@ -16480,6 +16525,8 @@ class NormalProfileDock(QDockWidget):
             QMessageBox.critical(self, 'Advanced Profile Tool — CRS Error',
                 'Project CRS is Geographic (degrees).\n'
                 'Switch to a Projected Metric CRS first.')
+            return
+        if _check_raster_layers_geographic(self, raster_entries):
             return
         self.btn_run.setEnabled(False)
         self.progress.setRange(0, 0)  # indeterminate while extracting
