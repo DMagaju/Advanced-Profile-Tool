@@ -2771,6 +2771,16 @@ class NormalProfileDock(QDockWidget):
             self.lbl_line.setStyleSheet('color:#E53935;font-style:italic;font-size:11px;')
             return
 
+        canvas_crs = self.canvas.mapSettings().destinationCrs()
+        if lyr.crs().isValid() and lyr.crs() != canvas_crs:
+            try:
+                xform = QgsCoordinateTransform(lyr.crs(), canvas_crs, QgsProject.instance())
+                geom.transform(xform)
+            except Exception as exc:
+                self.lbl_line.setText(f'Could not reproject line layer: {exc}')
+                self.lbl_line.setStyleSheet('color:#E53935;font-style:italic;font-size:11px;')
+                return
+
         # Merge multi-part geometry into a single polyline
         if geom.isMultipart():
             geom = geom.mergeLines()
