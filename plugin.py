@@ -1320,7 +1320,7 @@ class NormalProfileDock(QDockWidget):
         lc.setFilters(_RASTER_FILTER)
         lc.setAllowEmptyLayer(True)
         lc.setCurrentIndex(0)
-        lc.layerChanged.connect(lambda _: on_data_change())
+        lc.layerChanged.connect(lambda lyr: (self._warn_if_layer_geographic(lyr), on_data_change()))
         lc.wheelEvent = lambda e: e.ignore()
 
         ls_combo = QComboBox()
@@ -2631,6 +2631,13 @@ class NormalProfileDock(QDockWidget):
     def _trigger_update(self):
         if self._active_tab == 0 and self.profile_geom is not None:
             self._on_live_update(self.profile_geom)
+
+    def _warn_if_layer_geographic(self, lyr):
+        """Shows the geographic-raster warning the instant a raster is
+        picked in any raster combo, rather than waiting for a profile
+        line to be drawn/run — lets the user fix the layer right away."""
+        if isinstance(lyr, QgsRasterLayer):
+            _check_raster_layers_geographic(self, [(lyr, '')])
 
     def _add_check_level(self):
         v = self.check_level_spin.value()
@@ -6813,7 +6820,8 @@ class NormalProfileDock(QDockWidget):
         self.combo_terrain_raster.setAllowEmptyLayer(True)
         self.combo_terrain_raster.setCurrentIndex(0)
         self.combo_terrain_raster.wheelEvent = lambda e: e.ignore()
-        self.combo_terrain_raster.layerChanged.connect(lambda _: self._on_terrain_raster_changed())
+        self.combo_terrain_raster.layerChanged.connect(
+            lambda lyr: (self._warn_if_layer_geographic(lyr), self._on_terrain_raster_changed()))
         raster_row.addWidget(self.combo_terrain_raster, 1)
 
         _terrain_raster_ls = QComboBox()
@@ -11784,7 +11792,8 @@ class NormalProfileDock(QDockWidget):
         self.combo_embank_raster.setAllowEmptyLayer(True)
         self.combo_embank_raster.setCurrentIndex(0)
         self.combo_embank_raster.wheelEvent = lambda e: e.ignore()
-        self.combo_embank_raster.layerChanged.connect(lambda _: self._on_embank_raster_changed())
+        self.combo_embank_raster.layerChanged.connect(
+            lambda lyr: (self._warn_if_layer_geographic(lyr), self._on_embank_raster_changed()))
         raster_row.addWidget(self.combo_embank_raster, 1)
 
         _embank_raster_ls = QComboBox()
