@@ -2815,6 +2815,13 @@ class NormalProfileDock(QDockWidget):
         raster_entries, vector_entries, col_meta = self._collect_entries()
         if not raster_entries and not vector_entries:
             return
+        geographic_layers = [rl for rl, _col in raster_entries if rl.crs().isGeographic()]
+        if geographic_layers:
+            names = ', '.join(rl.name() for rl in geographic_layers)
+            self.lbl_status.setText(
+                f'Live preview paused — "{names}" is in a Geographic CRS '
+                '(degrees). Click Run for details and a suggested fix.')
+            return
         self._extracting = True
         try:
             data, chainages = self._extract(
